@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ActivityIndicator, Dimensions } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, ActivityIndicator, Dimensions, Platform } from 'react-native';
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE, type LatLng } from 'react-native-maps';
 import * as Location from 'expo-location';
 import AddressSearch from './src/components/AddressSearch';
@@ -9,6 +9,16 @@ interface RouteInfo {
   durationMin: number;
 }
 
+interface NearbyDriver {
+  id: string;
+  name: string;
+  lat: number;
+  lng: number;
+  distance: number;
+  car: string;
+  plate: string;
+}
+
 type TripPoint = {
   latitude: number;
   longitude: number;
@@ -16,6 +26,12 @@ type TripPoint = {
   fare?: number;
 };
 
+const fallbackApiBaseUrl = Platform.select({
+  android: 'http://10.0.2.2:3000',
+  default: 'http://localhost:3000',
+}) as string;
+
+const API_BASE_URL = (process.env.EXPO_PUBLIC_API_URL ?? fallbackApiBaseUrl).replace(/\/$/, '');
 const formatCop = (fare: number) => `$${fare.toLocaleString('es-CO')} COP`;
 
 export default function App() {
@@ -31,6 +47,9 @@ export default function App() {
   const [routeCoordinates, setRouteCoordinates] = useState<LatLng[]>([]);
   const [routeInfo, setRouteInfo] = useState<RouteInfo | null>(null);
   const [loadingRoute, setLoadingRoute] = useState(false);
+  const [requestingDriver, setRequestingDriver] = useState(false);
+  const [driverError, setDriverError] = useState<string | null>(null);
+  const [nearbyDrivers, setNearbyDrivers] = useState<NearbyDriver[]>([]);
   const mapRef = useRef<MapView | null>(null);
 
   const fallbackRouteCoordinates: LatLng[] = origin && destination
@@ -132,6 +151,58 @@ export default function App() {
 
     fetchRoute();
   }, [origin, destination]);
+
+  useEffect(() => {
+    setNearbyDrivers([]);
+    setDriverError(null);
+  }, [origin, destination]);
+
+  const handleRequestTrip = async () => {
+    if (!origin || !destination || requestingDriver) {
+      return;
+    }
+
+    setRequestingDriver(true);
+    setDriverError(null);
+    setNearbyDrivers([]);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/nearby-drivers`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          origin: {
+            latitude: origin.latitude,
+            longitude: origin.longitude,
+          },
+          destination: {
+            latitude: destination.latitude,
+            longitude: destination.longitude,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('No fue posible contactar el servidor de conductores.');
+      }
+
+      const data = await response.json();
+      const drivers = Array.isArray(data?.drivers) ? (data.drivers as NearbyDriver[]) : [];
+
+      if (drivers.length === 0) {
+        setDriverError('No hay conductores disponibles en este momento.');
+        return;
+      }
+
+      setNearbyDrivers(drivers);
+    } catch {
+      setDriverError('No se pudo solicitar el servicio. Verifica red y servidor.');
+    } finally {
+      setRequestingDriver(false);
+    }
+  };
 
   const handleGetStarted = async () => {
     setLoadingGps(true);
@@ -284,12 +355,30 @@ export default function App() {
           </View>
 
           <TouchableOpacity 
-            style={[styles.requestButton, loadingRoute && styles.disabledButton]} 
-            disabled={loadingRoute}
-            onPress={() => alert(`Buscando motorizado de MovilFusa para ir a: ${destination.name}`)}
+            style={[styles.requestButton, (loadingRoute || requestingDriver) && styles.disabledButton]} 
+            disabled={loadingRoute || requestingDriver}
+            onPress={handleRequestTrip}
           >
-            <Text style={styles.requestButtonText}>Solicitar Mototaxi Ya</Text>
+            {requestingDriver ? (
+              <ActivityIndicator color="#FFFFFF" />
+            ) : (
+              <Text style={styles.requestButtonText}>Solicitar Mototaxi Ya</Text>
+            )}
           </TouchableOpacity>
+
+          {driverError && <Text style={styles.driverErrorText}>{driverError}</Text>}
+
+          {nearbyDrivers.length > 0 && (
+            <View style={styles.driverCard}>
+              <Text style={styles.driverCardTitle}>Conductor asignado</Text>
+              <Text style={styles.driverCardLine}>{nearbyDrivers[0].name}</Text>
+              <Text style={styles.driverCardLine}>{nearbyDrivers[0].car} · {nearbyDrivers[0].plate}</Text>
+              <Text style={styles.driverCardLine}>A {nearbyDrivers[0].distance} m de tu origen</Text>
+              {nearbyDrivers.length > 1 && (
+                <Text style={styles.driverExtraText}>+{nearbyDrivers.length - 1} conductor(es) también disponibles</Text>
+              )}
+            </View>
+          )}
         </View>
       )}
     </View>
@@ -333,4 +422,9 @@ const styles = StyleSheet.create({
   requestButton: { backgroundColor: '#10B981', paddingVertical: 16, borderRadius: 16, alignItems: 'center', elevation: 2 },
   disabledButton: { backgroundColor: '#94A3B8' },
   requestButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: 'bold', letterSpacing: 0.5 },
+  driverErrorText: { marginTop: 10, fontSize: 12, color: '#DC2626', fontWeight: '600', textAlign: 'center' },
+  driverCard: { marginTop: 12, backgroundColor: '#ECFDF5', borderRadius: 14, padding: 12, borderWidth: 1, borderColor: '#A7F3D0' },
+  driverCardTitle: { fontSize: 13, fontWeight: '800', color: '#065F46', marginBottom: 4 },
+  driverCardLine: { fontSize: 13, color: '#065F46', fontWeight: '600' },
+  driverExtraText: { marginTop: 6, fontSize: 12, color: '#047857', fontWeight: '700' },
 });
