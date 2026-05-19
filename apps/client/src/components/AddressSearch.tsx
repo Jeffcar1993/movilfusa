@@ -12,6 +12,8 @@ type Place = {
   fare: number;
 };
 
+type ServiceType = 'pasajero' | 'encomienda';
+
 // Array definitivo consolidado con la Comuna Norte completa y los arreglos previos unificados
 const FUSA_PLACES: Place[] = [
   // ==========================================
@@ -131,9 +133,8 @@ interface AddressSearchProps {
   onSelectDestination: (destination: { latitude: number; longitude: number; name: string; fare: number; serviceType: ServiceType; packageNotes?: string }) => void;
   onClose: () => void;
   children?: React.ReactNode;
+  showServiceSelector?: boolean;
 }
-
-type ServiceType = 'pasajero' | 'encomienda';
 
 interface ServiceSelectorProps {
   activeService: ServiceType;
@@ -241,7 +242,7 @@ const normalizeText = (value: string) =>
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
 
-export default function AddressSearch({ onSelectDestination, onClose, children }: AddressSearchProps) {
+export default function AddressSearch({ onSelectDestination, onClose, children, showServiceSelector = true }: AddressSearchProps) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Place[]>([]);
   
@@ -275,6 +276,17 @@ export default function AddressSearch({ onSelectDestination, onClose, children }
   };
 
   const handleSelectPlace = (place: Place) => {
+    if (!showServiceSelector) {
+      onSelectDestination({
+        latitude: place.latitude,
+        longitude: place.longitude,
+        name: place.name,
+        fare: place.fare,
+        serviceType: 'pasajero',
+      });
+      return;
+    }
+
     // Seteamos el lugar seleccionado. Esto automáticamente oculta la lista y muestra el panel inferior de servicio
     setSelectedPlace(place);
     setQuery(place.name); // Muestra el nombre en el input de arriba como feedback visual limpio
@@ -304,7 +316,7 @@ export default function AddressSearch({ onSelectDestination, onClose, children }
             <Text style={styles.backButtonText}>← Atrás</Text>
           </TouchableOpacity>
           <Text style={styles.headerTitle}>
-            {selectedPlace ? 'Detalle del Servicio' : query ? 'Resultados' : '¿A dónde deseas ir?'}
+            {showServiceSelector && selectedPlace ? 'Detalle del Servicio' : query ? 'Resultados' : '¿A dónde deseas ir?'}
           </Text>
         </View>
 
@@ -314,13 +326,13 @@ export default function AddressSearch({ onSelectDestination, onClose, children }
           placeholderTextColor="#94A3B8"
           value={query}
           onChangeText={handleSearch}
-          autoFocus={!selectedPlace}
+          autoFocus={!showServiceSelector || !selectedPlace}
         />
         {children}
       </View>
 
       {/* RENDERIZADO CONDICIONAL DE LA UI BASADO EN UX */}
-      {selectedPlace ? (
+      {showServiceSelector && selectedPlace ? (
         // Si ya tocó un destino, le mostramos directamente el selector para cerrar el trato
         <View style={styles.selectorWrapper}>
           <ServiceSelector

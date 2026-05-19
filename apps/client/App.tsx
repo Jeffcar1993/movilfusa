@@ -19,11 +19,15 @@ interface NearbyDriver {
   plate: string;
 }
 
+type ServiceType = 'pasajero' | 'encomienda';
+
 type TripPoint = {
   latitude: number;
   longitude: number;
   name: string;
   fare?: number;
+  serviceType?: ServiceType;
+  packageNotes?: string;
 };
 
 const fallbackApiBaseUrl = Platform.select({
@@ -243,6 +247,7 @@ export default function App() {
   if (searchMode === 'origin') {
     return (
       <AddressSearch
+        showServiceSelector={false}
         onClose={() => setSearchMode(null)}
         onSelectDestination={(place) => {
           setOrigin({ latitude: place.latitude, longitude: place.longitude, name: place.name, fare: place.fare });
@@ -267,9 +272,17 @@ export default function App() {
   if (searchMode === 'destination') {
     return (
       <AddressSearch
+        showServiceSelector={true}
         onClose={() => setSearchMode(null)}
         onSelectDestination={(place) => {
-          setDestination(place);
+          setDestination({
+            latitude: place.latitude,
+            longitude: place.longitude,
+            name: place.name,
+            fare: place.fare,
+            serviceType: place.serviceType,
+            packageNotes: place.packageNotes,
+          });
           setSearchMode(null);
         }}
       />
@@ -328,7 +341,7 @@ export default function App() {
             if (!origin) {
               setOrigin({ latitude, longitude, name: 'Origen seleccionado en mapa' });
             } else {
-              setDestination({ latitude, longitude, name: 'Destino seleccionado en mapa' });
+              setDestination({ latitude, longitude, name: 'Destino seleccionado en mapa', serviceType: 'pasajero' });
             }
           }}
         >
@@ -346,6 +359,16 @@ export default function App() {
       {/* TARJETA INFERIOR: UI/UX DE CONFIRMACIÓN FINAL */}
       {origin && destination && (
         <View style={styles.confirmTripContainer}>
+          <View style={styles.serviceTypeBadge}>
+            <Text style={styles.serviceTypeBadgeText}>
+              {destination.serviceType === 'encomienda' ? 'Servicio: Encomienda' : 'Servicio: Viaje en moto'}
+            </Text>
+          </View>
+
+          {destination.serviceType === 'encomienda' && destination.packageNotes ? (
+            <Text style={styles.packageNotesText}>Detalle de envío: {destination.packageNotes}</Text>
+          ) : null}
+
           <View style={styles.fareRow}>
             <View>
               <Text style={styles.fareLabel}>Costo del servicio:</Text>
@@ -412,6 +435,9 @@ const styles = StyleSheet.create({
   embeddedGpsText: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
 
   confirmTripContainer: { position: 'absolute', left: 16, right: 16, bottom: 30, backgroundColor: '#FFFFFF', borderRadius: 24, padding: 20, elevation: 12, shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.15, shadowRadius: 10, zIndex: 30 },
+  serviceTypeBadge: { alignSelf: 'flex-start', marginBottom: 10, backgroundColor: '#FEF3C7', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6 },
+  serviceTypeBadgeText: { fontSize: 12, fontWeight: '800', color: '#92400E' },
+  packageNotesText: { marginBottom: 10, fontSize: 12, color: '#475569', fontWeight: '600' },
   tripHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 },
   tripTitle: { fontSize: 18, fontWeight: '800', color: '#1E3A8A' },
   cancelText: { color: '#EF4444', fontWeight: '700', fontSize: 14 },
