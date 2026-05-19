@@ -20,7 +20,7 @@ const FUSA_PLACES: Place[] = [
   { id: '4', name: 'Universidad de Cundinamarca (UDEC)', address: 'Diagonal 18 # 20-29', latitude: 4.3318, longitude: -74.3606, zone: 'urbano', fare: 5000 },
   { id: '5', name: 'Hospital San Rafael', address: 'Carrera 4 # 13-10', latitude: 4.3495, longitude: -74.3615, zone: 'urbano', fare: 5000 },
   { id: '6', name: 'El Indio (Sector Abajo Indio)', address: 'Avenida las Palmas, Fusagasugá', latitude: 4.3398, longitude: -74.3780, zone: 'abajo_indio', fare: 6000 },
-  { id: '7', name: 'Manta Amarillo (Sector Abajo)', address: 'Vía Antigua Panamericana, Fusa', latitude: 4.3260, longitude: -74.3820, zone: 'abajo_m_amarillo', fare: 7000 },
+  { id: '7', name: 'Maiz Amarillo (Sector Abajo)', address: 'Vía Antigua Panamericana, Fusa', latitude: 4.3260, longitude: -74.3820, zone: 'abajo_m_amarillo', fare: 7000 },
 
   // --- Fuera del Perímetro / Rural / Aledaños ---
   { id: '8', name: 'Puente de Cucharal', address: 'Vía Panamericana Sur', latitude: 4.3162, longitude: -74.3912, zone: 'fuera_perimetro', fare: 5000 },
