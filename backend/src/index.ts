@@ -1,6 +1,15 @@
 const express = require('express');
 import type { Request, Response } from 'express';
 
+type ServiceType = 'pasajero' | 'encomienda';
+
+interface NearbyDriversRequestBody {
+  origin?: { latitude?: number; longitude?: number };
+  destination?: { latitude?: number; longitude?: number };
+  serviceType?: ServiceType;
+  packageNotes?: string;
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -13,7 +22,16 @@ app.get('/api/health', (req: Request, res: Response) => {
 
 // Endpoint para buscar conductores cercanos
 app.post('/api/nearby-drivers', (req: Request, res: Response) => {
-  const { origin, destination } = req.body;
+  const { origin, destination, serviceType, packageNotes } = req.body as NearbyDriversRequestBody;
+  const resolvedServiceType: ServiceType = serviceType === 'encomienda' ? 'encomienda' : 'pasajero';
+
+  if (typeof origin?.latitude !== 'number' || typeof origin?.longitude !== 'number') {
+    return res.status(400).json({
+      message: 'Origen invalido.',
+      serviceType: resolvedServiceType,
+    });
+  }
+
   // Simulación: lista de conductores ficticios
   const drivers = [
     {
@@ -36,10 +54,19 @@ app.post('/api/nearby-drivers', (req: Request, res: Response) => {
     },
   ];
   // Simula que a veces no hay conductores
-  if (!origin || Math.random() < 0.1) {
-    return res.json({ drivers: [] });
+  if (Math.random() < 0.1) {
+    return res.json({
+      drivers: [],
+      serviceType: resolvedServiceType,
+      packageNotes: resolvedServiceType === 'encomienda' ? packageNotes ?? '' : undefined,
+    });
   }
-  res.json({ drivers });
+
+  res.json({
+    drivers,
+    serviceType: resolvedServiceType,
+    packageNotes: resolvedServiceType === 'encomienda' ? packageNotes ?? '' : undefined,
+  });
 });
 
 app.listen(PORT, () => {

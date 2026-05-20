@@ -21,6 +21,13 @@ interface NearbyDriver {
 
 type ServiceType = 'pasajero' | 'encomienda';
 
+interface NearbyDriversResponse {
+  drivers?: NearbyDriver[];
+  serviceType?: ServiceType;
+  packageNotes?: string;
+  message?: string;
+}
+
 type TripPoint = {
   latitude: number;
   longitude: number;
@@ -53,6 +60,7 @@ export default function App() {
   const [loadingRoute, setLoadingRoute] = useState(false);
   const [requestingDriver, setRequestingDriver] = useState(false);
   const [driverError, setDriverError] = useState<string | null>(null);
+  const [requestMetaMessage, setRequestMetaMessage] = useState<string | null>(null);
   const [nearbyDrivers, setNearbyDrivers] = useState<NearbyDriver[]>([]);
   const mapRef = useRef<MapView | null>(null);
 
@@ -159,6 +167,7 @@ export default function App() {
   useEffect(() => {
     setNearbyDrivers([]);
     setDriverError(null);
+    setRequestMetaMessage(null);
   }, [origin, destination]);
 
   const handleRequestTrip = async () => {
@@ -168,6 +177,7 @@ export default function App() {
 
     setRequestingDriver(true);
     setDriverError(null);
+    setRequestMetaMessage(null);
     setNearbyDrivers([]);
 
     try {
@@ -185,14 +195,22 @@ export default function App() {
             latitude: destination.latitude,
             longitude: destination.longitude,
           },
+          serviceType: destination.serviceType ?? 'pasajero',
+          packageNotes: destination.packageNotes,
         }),
       });
 
+      const data = (await response.json()) as NearbyDriversResponse;
+
+      const confirmedServiceType: ServiceType = data?.serviceType === 'encomienda' ? 'encomienda' : 'pasajero';
+      setRequestMetaMessage(
+        `Solicitud enviada como ${confirmedServiceType === 'encomienda' ? 'encomienda' : 'viaje en moto'}.`,
+      );
+
       if (!response.ok) {
-        throw new Error('No fue posible contactar el servidor de conductores.');
+        throw new Error(data?.message ?? 'No fue posible contactar el servidor de conductores.');
       }
 
-      const data = await response.json();
       const drivers = Array.isArray(data?.drivers) ? (data.drivers as NearbyDriver[]) : [];
 
       if (drivers.length === 0) {
@@ -248,6 +266,10 @@ export default function App() {
     return (
       <AddressSearch
         showServiceSelector={false}
+        currentLocation={{
+          latitude: location?.coords.latitude ?? 4.33646,
+          longitude: location?.coords.longitude ?? -74.36378,
+        }}
         onClose={() => setSearchMode(null)}
         onSelectDestination={(place) => {
           setOrigin({ latitude: place.latitude, longitude: place.longitude, name: place.name, fare: place.fare });
@@ -273,6 +295,10 @@ export default function App() {
     return (
       <AddressSearch
         showServiceSelector={true}
+        currentLocation={{
+          latitude: origin?.latitude ?? location?.coords.latitude ?? 4.33646,
+          longitude: origin?.longitude ?? location?.coords.longitude ?? -74.36378,
+        }}
         onClose={() => setSearchMode(null)}
         onSelectDestination={(place) => {
           setDestination({
@@ -296,7 +322,7 @@ export default function App() {
         <View style={styles.inputRow}>
           <TouchableOpacity style={styles.inputField} onPress={() => setSearchMode('origin')}>
             <Text style={[styles.inputLabel, { color: origin ? '#1E3A8A' : '#94A3B8' }]}>¿Dónde estás?</Text>
-            <Text style={styles.inputValue} numberOfLines={1}>{origin ? origin.name : 'Toca para buscar o usa el mapa'}</Text>
+            <Text style={styles.inputValue} numberOfLines={1}>{origin ? origin.name : 'Toca para buscar tu origen'}</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.useLocationButton}
@@ -313,7 +339,7 @@ export default function App() {
         <View style={styles.inputRow}>
           <TouchableOpacity style={styles.inputField} onPress={() => setSearchMode('destination')} disabled={!origin}>
             <Text style={[styles.inputLabel, { color: destination ? '#1E3A8A' : '#94A3B8' }]}>¿A dónde vas?</Text>
-            <Text style={styles.inputValue} numberOfLines={1}>{destination ? destination.name : 'Toca para buscar o usa el mapa'}</Text>
+            <Text style={styles.inputValue} numberOfLines={1}>{destination ? destination.name : 'Toca para buscar tu destino'}</Text>
           </TouchableOpacity>
         </View>
         
@@ -336,14 +362,6 @@ export default function App() {
             longitudeDelta: 0.015,
           }}
           showsUserLocation={true}
-          onPress={e => {
-            const { latitude, longitude } = e.nativeEvent.coordinate;
-            if (!origin) {
-              setOrigin({ latitude, longitude, name: 'Origen seleccionado en mapa' });
-            } else {
-              setDestination({ latitude, longitude, name: 'Destino seleccionado en mapa', serviceType: 'pasajero' });
-            }
-          }}
         >
           {origin && <Marker coordinate={{ latitude: origin.latitude, longitude: origin.longitude }} title={origin.name} pinColor="blue" />}
           {destination && <Marker coordinate={{ latitude: destination.latitude, longitude: destination.longitude }} title="Destino" description={destination.name} pinColor="green" />}
@@ -388,6 +406,8 @@ export default function App() {
               <Text style={styles.requestButtonText}>Solicitar Mototaxi Ya</Text>
             )}
           </TouchableOpacity>
+
+          {requestMetaMessage && <Text style={styles.requestMetaText}>{requestMetaMessage}</Text>}
 
           {driverError && <Text style={styles.driverErrorText}>{driverError}</Text>}
 
@@ -448,6 +468,7 @@ const styles = StyleSheet.create({
   requestButton: { backgroundColor: '#10B981', paddingVertical: 16, borderRadius: 16, alignItems: 'center', elevation: 2 },
   disabledButton: { backgroundColor: '#94A3B8' },
   requestButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: 'bold', letterSpacing: 0.5 },
+  requestMetaText: { marginTop: 10, fontSize: 12, color: '#0F766E', fontWeight: '700', textAlign: 'center' },
   driverErrorText: { marginTop: 10, fontSize: 12, color: '#DC2626', fontWeight: '600', textAlign: 'center' },
   driverCard: { marginTop: 12, backgroundColor: '#ECFDF5', borderRadius: 14, padding: 12, borderWidth: 1, borderColor: '#A7F3D0' },
   driverCardTitle: { fontSize: 13, fontWeight: '800', color: '#065F46', marginBottom: 4 },

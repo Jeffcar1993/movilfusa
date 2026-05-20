@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { StyleSheet, Text, View, TextInput, TouchableOpacity, FlatList } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import MapView, { Marker, type LatLng } from 'react-native-maps';
 
 type Place = {
   id: string;
@@ -134,6 +135,7 @@ interface AddressSearchProps {
   onClose: () => void;
   children?: React.ReactNode;
   showServiceSelector?: boolean;
+  currentLocation?: { latitude: number; longitude: number };
 }
 
 interface ServiceSelectorProps {
@@ -242,7 +244,7 @@ const normalizeText = (value: string) =>
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
 
-export default function AddressSearch({ onSelectDestination, onClose, children, showServiceSelector = true }: AddressSearchProps) {
+export default function AddressSearch({ onSelectDestination, onClose, children, showServiceSelector = true, currentLocation }: AddressSearchProps) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Place[]>([]);
   
@@ -250,6 +252,8 @@ export default function AddressSearch({ onSelectDestination, onClose, children, 
   const [selectedPlace, setSelectedPlace] = useState<Place | null>(null);
   const [serviceType, setServiceType] = useState<ServiceType>('pasajero');
   const [packageNotes, setPackageNotes] = useState('');
+  const [isMapPickerVisible, setIsMapPickerVisible] = useState(false);
+  const [mapPickedPoint, setMapPickedPoint] = useState<LatLng | null>(null);
 
   const handleSearch = (text: string) => {
     setQuery(text);
@@ -306,17 +310,69 @@ export default function AddressSearch({ onSelectDestination, onClose, children, 
     });
   };
 
+  const handleOpenMapPicker = () => {
+    setIsMapPickerVisible(true);
+    setMapPickedPoint(null);
+    setSelectedPlace(null);
+  };
+
+  const handleConfirmMapPoint = () => {
+    if (!mapPickedPoint) return;
+
+    const pointName = showServiceSelector ? 'Destino seleccionado en mapa' : 'Origen seleccionado en mapa';
+
+    if (!showServiceSelector) {
+      onSelectDestination({
+        latitude: mapPickedPoint.latitude,
+        longitude: mapPickedPoint.longitude,
+        name: pointName,
+        fare: 0,
+        serviceType: 'pasajero',
+      });
+      return;
+    }
+
+    setIsMapPickerVisible(false);
+    setSelectedPlace({
+      id: 'map-destination',
+      name: pointName,
+      address: 'Pin elegido manualmente',
+      latitude: mapPickedPoint.latitude,
+      longitude: mapPickedPoint.longitude,
+      zone: 'map_pin',
+      fare: 0,
+    });
+    setQuery(pointName);
+  };
+
   const formatFare = (fare: number) => `$${fare.toLocaleString('es-CO')}`;
 
   return (
     <View style={styles.container}>
       <View style={styles.headerCard}>
         <View style={styles.topRow}>
-          <TouchableOpacity style={styles.backButton} onPress={onClose}>
+          <TouchableOpacity
+            style={styles.backButton}
+            onPress={() => {
+              if (isMapPickerVisible) {
+                setIsMapPickerVisible(false);
+                return;
+              }
+              onClose();
+            }}
+          >
             <Text style={styles.backButtonText}>← Atrás</Text>
           </TouchableOpacity>
           <Text style={styles.headerTitle}>
-            {showServiceSelector && selectedPlace ? 'Detalle del Servicio' : query ? 'Resultados' : '¿A dónde deseas ir?'}
+            {isMapPickerVisible
+              ? showServiceSelector ? 'Marca tu destino' : 'Marca tu ubicacion'
+              : showServiceSelector && selectedPlace
+                ? 'Detalle del Servicio'
+                : query
+                  ? 'Resultados'
+                  : showServiceSelector
+                    ? '¿A dónde deseas ir?'
+                    : '¿Dónde estás?'}
           </Text>
         </View>
 
@@ -327,12 +383,56 @@ export default function AddressSearch({ onSelectDestination, onClose, children, 
           value={query}
           onChangeText={handleSearch}
           autoFocus={!showServiceSelector || !selectedPlace}
+          editable={!isMapPickerVisible}
         />
+
+        {!selectedPlace && !isMapPickerVisible && (
+          <TouchableOpacity style={styles.mapPickButton} onPress={handleOpenMapPicker}>
+            <MaterialCommunityIcons name="map-marker-plus" size={18} color="#1E3A8A" />
+            <Text style={styles.mapPickButtonText}>
+              {showServiceSelector ? 'Elegir destino con pin en el mapa' : 'Elegir origen con pin en el mapa'}
+            </Text>
+          </TouchableOpacity>
+        )}
         {children}
       </View>
 
       {/* RENDERIZADO CONDICIONAL DE LA UI BASADO EN UX */}
-      {showServiceSelector && selectedPlace ? (
+      {isMapPickerVisible ? (
+        <View style={styles.mapPickerContainer}>
+          <MapView
+            style={styles.mapPicker}
+            initialRegion={{
+              latitude: currentLocation?.latitude ?? 4.33646,
+              longitude: currentLocation?.longitude ?? -74.36378,
+              latitudeDelta: 0.02,
+              longitudeDelta: 0.02,
+            }}
+            onPress={(e) => setMapPickedPoint(e.nativeEvent.coordinate)}
+          >
+            {mapPickedPoint && <Marker coordinate={mapPickedPoint} title="Destino marcado" pinColor="#16A34A" />}
+          </MapView>
+
+          <Text style={styles.mapHint}>
+            {showServiceSelector ? 'Toca el mapa para ubicar el pin de destino' : 'Toca el mapa para ubicar tu pin de origen'}
+          </Text>
+
+          <View style={styles.mapPickerActions}>
+            <TouchableOpacity style={styles.mapSecondaryButton} onPress={() => setIsMapPickerVisible(false)}>
+              <Text style={styles.mapSecondaryButtonText}>Cancelar</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.mapPrimaryButton, !mapPickedPoint && styles.mapPrimaryButtonDisabled]}
+              onPress={handleConfirmMapPoint}
+              disabled={!mapPickedPoint}
+            >
+              <Text style={styles.mapPrimaryButtonText}>
+                {showServiceSelector ? 'Confirmar destino' : 'Confirmar origen'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : showServiceSelector && selectedPlace ? (
         // Si ya tocó un destino, le mostramos directamente el selector para cerrar el trato
         <View style={styles.selectorWrapper}>
           <ServiceSelector
@@ -398,7 +498,18 @@ const styles = StyleSheet.create({
   placeAddress: { fontSize: 14, color: '#64748B', marginTop: 4 },
   fareTag: { fontSize: 12, fontWeight: '700', color: '#0F766E', backgroundColor: '#CCFBF1', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
   emptyText: { textAlign: 'center', color: '#64748B', marginTop: 20 },
-  selectorWrapper: { flex: 1, justifyContent: 'flex-end' }
+  selectorWrapper: { flex: 1, justifyContent: 'flex-end' },
+  mapPickButton: { marginTop: 12, backgroundColor: '#EFF6FF', borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  mapPickButtonText: { color: '#1E3A8A', fontWeight: '700', fontSize: 13 },
+  mapPickerContainer: { flex: 1, padding: 16, gap: 10 },
+  mapPicker: { flex: 1, borderRadius: 16 },
+  mapHint: { textAlign: 'center', color: '#475569', fontSize: 12, fontWeight: '600' },
+  mapPickerActions: { flexDirection: 'row', gap: 10 },
+  mapSecondaryButton: { flex: 1, backgroundColor: '#E2E8F0', borderRadius: 10, paddingVertical: 12, alignItems: 'center' },
+  mapSecondaryButtonText: { color: '#334155', fontWeight: '700' },
+  mapPrimaryButton: { flex: 1, backgroundColor: '#10B981', borderRadius: 10, paddingVertical: 12, alignItems: 'center' },
+  mapPrimaryButtonDisabled: { backgroundColor: '#94A3B8' },
+  mapPrimaryButtonText: { color: '#FFFFFF', fontWeight: '700' }
 });
 
 // Estilos específicos e impecables para el módulo inferior del Selector de Servicios
