@@ -59,6 +59,7 @@ export default function App() {
   const [routeInfo, setRouteInfo] = useState<RouteInfo | null>(null);
   const [loadingRoute, setLoadingRoute] = useState(false);
   const [requestingDriver, setRequestingDriver] = useState(false);
+  const [isMatching, setIsMatching] = useState(false);
   const [driverError, setDriverError] = useState<string | null>(null);
   const [requestMetaMessage, setRequestMetaMessage] = useState<string | null>(null);
   const [nearbyDrivers, setNearbyDrivers] = useState<NearbyDriver[]>([]);
@@ -168,14 +169,16 @@ export default function App() {
     setNearbyDrivers([]);
     setDriverError(null);
     setRequestMetaMessage(null);
+    setIsMatching(false);
   }, [origin, destination]);
 
   const handleRequestTrip = async () => {
-    if (!origin || !destination || requestingDriver) {
+    if (!origin || !destination || requestingDriver || isMatching) {
       return;
     }
 
     setRequestingDriver(true);
+    setIsMatching(true);
     setDriverError(null);
     setRequestMetaMessage(null);
     setNearbyDrivers([]);
@@ -204,26 +207,26 @@ export default function App() {
 
       const confirmedServiceType: ServiceType = data?.serviceType === 'encomienda' ? 'encomienda' : 'pasajero';
       setRequestMetaMessage(
-        `Solicitud enviada como ${confirmedServiceType === 'encomienda' ? 'encomienda' : 'viaje en moto'}.`,
+        `Solicitud enviada como ${confirmedServiceType === 'encomienda' ? 'encomienda' : 'viaje en moto'}. Buscando conductor cercano...`,
       );
 
       if (!response.ok) {
         throw new Error(data?.message ?? 'No fue posible contactar el servidor de conductores.');
       }
-
-      const drivers = Array.isArray(data?.drivers) ? (data.drivers as NearbyDriver[]) : [];
-
-      if (drivers.length === 0) {
-        setDriverError('No hay conductores disponibles en este momento.');
-        return;
-      }
-
-      setNearbyDrivers(drivers);
     } catch {
       setDriverError('No se pudo solicitar el servicio. Verifica red y servidor.');
+      setIsMatching(false);
     } finally {
       setRequestingDriver(false);
     }
+  };
+
+  const handleCancelRequest = () => {
+    setIsMatching(false);
+    setRequestingDriver(false);
+    setRequestMetaMessage(null);
+    setDriverError(null);
+    setNearbyDrivers([]);
   };
 
   const handleGetStarted = async () => {
@@ -377,50 +380,52 @@ export default function App() {
       {/* TARJETA INFERIOR: UI/UX DE CONFIRMACIÓN FINAL */}
       {origin && destination && (
         <View style={styles.confirmTripContainer}>
-          <View style={styles.serviceTypeBadge}>
-            <Text style={styles.serviceTypeBadgeText}>
-              {destination.serviceType === 'encomienda' ? 'Servicio: Encomienda' : 'Servicio: Viaje en moto'}
-            </Text>
-          </View>
+          {isMatching ? (
+            <View style={styles.matchingContainer}>
+              <Text style={styles.matchingTitle}>Buscando conductor cercano...</Text>
+              <ActivityIndicator size="large" color="#10B981" style={styles.matchingLoader} />
+              <Text style={styles.matchingSubtitle}>Estamos enviando tu solicitud a los motorizados disponibles.</Text>
 
-          {destination.serviceType === 'encomienda' && destination.packageNotes ? (
-            <Text style={styles.packageNotesText}>Detalle de envío: {destination.packageNotes}</Text>
-          ) : null}
+              {requestMetaMessage && <Text style={styles.requestMetaText}>{requestMetaMessage}</Text>}
 
-          <View style={styles.fareRow}>
-            <View>
-              <Text style={styles.fareLabel}>Costo del servicio:</Text>
-              <Text style={styles.paymentMethod}>Pago al conductor</Text>
+              <TouchableOpacity style={styles.cancelRequestButton} onPress={handleCancelRequest}>
+                <Text style={styles.cancelRequestButtonText}>Cancelar Solicitud</Text>
+              </TouchableOpacity>
             </View>
-            <Text style={styles.fareAmount}>{formatCop(computedFare ?? 5000)}</Text>
-          </View>
+          ) : (
+            <>
+              <View style={styles.serviceTypeBadge}>
+                <Text style={styles.serviceTypeBadgeText}>
+                  {destination.serviceType === 'encomienda' ? 'Servicio: Encomienda' : 'Servicio: Viaje en moto'}
+                </Text>
+              </View>
 
-          <TouchableOpacity 
-            style={[styles.requestButton, (loadingRoute || requestingDriver) && styles.disabledButton]} 
-            disabled={loadingRoute || requestingDriver}
-            onPress={handleRequestTrip}
-          >
-            {requestingDriver ? (
-              <ActivityIndicator color="#FFFFFF" />
-            ) : (
-              <Text style={styles.requestButtonText}>Solicitar Mototaxi Ya</Text>
-            )}
-          </TouchableOpacity>
+              {destination.serviceType === 'encomienda' && destination.packageNotes ? (
+                <Text style={styles.packageNotesText}>Detalle de envío: {destination.packageNotes}</Text>
+              ) : null}
 
-          {requestMetaMessage && <Text style={styles.requestMetaText}>{requestMetaMessage}</Text>}
+              <View style={styles.fareRow}>
+                <View>
+                  <Text style={styles.fareLabel}>Costo del servicio:</Text>
+                  <Text style={styles.paymentMethod}>Pago al conductor</Text>
+                </View>
+                <Text style={styles.fareAmount}>{formatCop(computedFare ?? 5000)}</Text>
+              </View>
 
-          {driverError && <Text style={styles.driverErrorText}>{driverError}</Text>}
+              <TouchableOpacity 
+                style={[styles.requestButton, (loadingRoute || requestingDriver) && styles.disabledButton]} 
+                disabled={loadingRoute || requestingDriver}
+                onPress={handleRequestTrip}
+              >
+                {requestingDriver ? (
+                  <ActivityIndicator color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.requestButtonText}>Solicitar Mototaxi Ya</Text>
+                )}
+              </TouchableOpacity>
 
-          {nearbyDrivers.length > 0 && (
-            <View style={styles.driverCard}>
-              <Text style={styles.driverCardTitle}>Conductor asignado</Text>
-              <Text style={styles.driverCardLine}>{nearbyDrivers[0].name}</Text>
-              <Text style={styles.driverCardLine}>{nearbyDrivers[0].car} · {nearbyDrivers[0].plate}</Text>
-              <Text style={styles.driverCardLine}>A {nearbyDrivers[0].distance} m de tu origen</Text>
-              {nearbyDrivers.length > 1 && (
-                <Text style={styles.driverExtraText}>+{nearbyDrivers.length - 1} conductor(es) también disponibles</Text>
-              )}
-            </View>
+              {driverError && <Text style={styles.driverErrorText}>{driverError}</Text>}
+            </>
           )}
         </View>
       )}
@@ -468,10 +473,12 @@ const styles = StyleSheet.create({
   requestButton: { backgroundColor: '#10B981', paddingVertical: 16, borderRadius: 16, alignItems: 'center', elevation: 2 },
   disabledButton: { backgroundColor: '#94A3B8' },
   requestButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: 'bold', letterSpacing: 0.5 },
+  matchingContainer: { alignItems: 'center' },
+  matchingTitle: { fontSize: 18, fontWeight: '800', color: '#1E3A8A', textAlign: 'center' },
+  matchingLoader: { marginTop: 14, marginBottom: 10 },
+  matchingSubtitle: { fontSize: 13, color: '#64748B', textAlign: 'center', fontWeight: '600', lineHeight: 18 },
+  cancelRequestButton: { marginTop: 14, backgroundColor: '#EF4444', paddingVertical: 12, paddingHorizontal: 18, borderRadius: 12 },
+  cancelRequestButtonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14 },
   requestMetaText: { marginTop: 10, fontSize: 12, color: '#0F766E', fontWeight: '700', textAlign: 'center' },
   driverErrorText: { marginTop: 10, fontSize: 12, color: '#DC2626', fontWeight: '600', textAlign: 'center' },
-  driverCard: { marginTop: 12, backgroundColor: '#ECFDF5', borderRadius: 14, padding: 12, borderWidth: 1, borderColor: '#A7F3D0' },
-  driverCardTitle: { fontSize: 13, fontWeight: '800', color: '#065F46', marginBottom: 4 },
-  driverCardLine: { fontSize: 13, color: '#065F46', fontWeight: '600' },
-  driverExtraText: { marginTop: 6, fontSize: 12, color: '#047857', fontWeight: '700' },
 });
