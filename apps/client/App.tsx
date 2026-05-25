@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, ActivityIndicator, Dimensions, Platform } from 'react-native';
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE, type LatLng } from 'react-native-maps';
 import * as Location from 'expo-location';
+import { io, type Socket } from 'socket.io-client';
 import AddressSearch from './src/components/AddressSearch';
 
 interface RouteInfo {
@@ -9,21 +10,28 @@ interface RouteInfo {
   durationMin: number;
 }
 
-interface NearbyDriver {
+type ServiceType = 'pasajero' | 'encomienda';
+
+type TripStatus = 'PENDING' | 'CONDUCTOR_EN_CAMINO' | 'CANCELADO';
+
+interface DriverProfile {
   id: string;
   name: string;
-  lat: number;
-  lng: number;
-  distance: number;
-  car: string;
+  vehicle: string;
   plate: string;
 }
 
-type ServiceType = 'pasajero' | 'encomienda';
+interface TripRecord {
+  id: string;
+  fare: number;
+  status: TripStatus;
+  serviceType: ServiceType;
+  packageNotes?: string;
+  driver?: DriverProfile;
+}
 
-interface NearbyDriversResponse {
-  drivers?: NearbyDriver[];
-  serviceType?: ServiceType;
+interface CreateTripResponse {
+  trip?: TripRecord | null;
   packageNotes?: string;
   message?: string;
 }
@@ -62,8 +70,11 @@ export default function App() {
   const [isMatching, setIsMatching] = useState(false);
   const [driverError, setDriverError] = useState<string | null>(null);
   const [requestMetaMessage, setRequestMetaMessage] = useState<string | null>(null);
-  const [nearbyDrivers, setNearbyDrivers] = useState<NearbyDriver[]>([]);
+  const [currentTripId, setCurrentTripId] = useState<string | null>(null);
+  const [tripStatus, setTripStatus] = useState<TripStatus | null>(null);
   const mapRef = useRef<MapView | null>(null);
+  const socketRef = useRef<Socket | null>(null);
+  const currentTripIdRef = useRef<string | null>(null);
 
   const fallbackRouteCoordinates: LatLng[] = origin && destination
     ? [
@@ -166,14 +177,79 @@ export default function App() {
   }, [origin, destination]);
 
   useEffect(() => {
-    setNearbyDrivers([]);
     setDriverError(null);
     setRequestMetaMessage(null);
     setIsMatching(false);
+    setCurrentTripId(null);
+    setTripStatus(null);
   }, [origin, destination]);
 
+  useEffect(() => {
+    currentTripIdRef.current = currentTripId;
+  }, [currentTripId]);
+
+  useEffect(() => {
+    const socket = io(API_BASE_URL, {
+      transports: ['websocket'],
+    });
+
+    const subscribeCurrentTrip = () => {
+      if (currentTripIdRef.current) {
+        socket.emit('trip:watch', currentTripIdRef.current);
+      }
+    };
+
+    const handleTripUpdated = (payload: CreateTripResponse) => {
+      const trip = payload.trip;
+
+      if (!trip || trip.id !== currentTripIdRef.current) {
+        return;
+      }
+
+      setTripStatus(trip.status);
+
+      if (trip.status === 'CONDUCTOR_EN_CAMINO') {
+        setRequestMetaMessage(
+          `${trip.driver?.name ?? 'Un conductor'} aceptó tu solicitud y va en camino${trip.driver?.plate ? ` · Placa ${trip.driver.plate}` : ''}.`,
+        );
+        return;
+      }
+
+      if (trip.status === 'CANCELADO') {
+        setRequestMetaMessage('La solicitud fue cancelada.');
+        setIsMatching(false);
+        setCurrentTripId(null);
+      }
+    };
+
+    const handleConnectionError = () => {
+      setDriverError('No se pudo abrir el canal en tiempo real con el servidor.');
+    };
+
+    socketRef.current = socket;
+    socket.on('connect', subscribeCurrentTrip);
+    socket.on('trip:updated', handleTripUpdated);
+    socket.on('connect_error', handleConnectionError);
+
+    return () => {
+      socket.off('connect', subscribeCurrentTrip);
+      socket.off('trip:updated', handleTripUpdated);
+      socket.off('connect_error', handleConnectionError);
+      socket.disconnect();
+      socketRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!currentTripId || !isMatching) {
+      return;
+    }
+
+    socketRef.current?.emit('trip:watch', currentTripId);
+  }, [currentTripId, isMatching]);
+
   const handleRequestTrip = async () => {
-    if (!origin || !destination || requestingDriver || isMatching) {
+    if (!origin || !destination || requestingDriver || isMatching || !computedFare) {
       return;
     }
 
@@ -181,10 +257,10 @@ export default function App() {
     setIsMatching(true);
     setDriverError(null);
     setRequestMetaMessage(null);
-    setNearbyDrivers([]);
+    setTripStatus('PENDING');
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/nearby-drivers`, {
+      const response = await fetch(`${API_BASE_URL}/api/trips`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -193,19 +269,22 @@ export default function App() {
           origin: {
             latitude: origin.latitude,
             longitude: origin.longitude,
+            name: origin.name,
           },
           destination: {
             latitude: destination.latitude,
             longitude: destination.longitude,
+            name: destination.name,
           },
+          fare: computedFare,
           serviceType: destination.serviceType ?? 'pasajero',
           packageNotes: destination.packageNotes,
         }),
       });
 
-      const data = (await response.json()) as NearbyDriversResponse;
+      const data = (await response.json()) as CreateTripResponse;
 
-      const confirmedServiceType: ServiceType = data?.serviceType === 'encomienda' ? 'encomienda' : 'pasajero';
+      const confirmedServiceType: ServiceType = destination.serviceType === 'encomienda' ? 'encomienda' : 'pasajero';
       setRequestMetaMessage(
         `Solicitud enviada como ${confirmedServiceType === 'encomienda' ? 'encomienda' : 'viaje en moto'}. Buscando conductor cercano...`,
       );
@@ -213,20 +292,40 @@ export default function App() {
       if (!response.ok) {
         throw new Error(data?.message ?? 'No fue posible contactar el servidor de conductores.');
       }
+
+      setCurrentTripId(data.trip?.id ?? null);
+      if (data.trip?.id) {
+        socketRef.current?.emit('trip:watch', data.trip.id);
+      }
     } catch {
       setDriverError('No se pudo solicitar el servicio. Verifica red y servidor.');
       setIsMatching(false);
+      setCurrentTripId(null);
+      setTripStatus(null);
     } finally {
       setRequestingDriver(false);
     }
   };
 
-  const handleCancelRequest = () => {
+  const handleCancelRequest = async () => {
+    const tripIdToCancel = currentTripId;
+
+    if (tripIdToCancel) {
+      try {
+        await fetch(`${API_BASE_URL}/api/trips/${tripIdToCancel}/cancel`, {
+          method: 'POST',
+        });
+      } catch {
+        setDriverError('No se pudo cancelar la solicitud en el servidor.');
+      }
+    }
+
     setIsMatching(false);
     setRequestingDriver(false);
     setRequestMetaMessage(null);
     setDriverError(null);
-    setNearbyDrivers([]);
+    setCurrentTripId(null);
+    setTripStatus(null);
   };
 
   const handleGetStarted = async () => {
@@ -382,15 +481,23 @@ export default function App() {
         <View style={styles.confirmTripContainer}>
           {isMatching ? (
             <View style={styles.matchingContainer}>
-              <Text style={styles.matchingTitle}>Buscando conductor cercano...</Text>
+              <Text style={styles.matchingTitle}>
+                {tripStatus === 'CONDUCTOR_EN_CAMINO' ? 'Conductor confirmado' : 'Buscando conductor cercano...'}
+              </Text>
               <ActivityIndicator size="large" color="#10B981" style={styles.matchingLoader} />
-              <Text style={styles.matchingSubtitle}>Estamos enviando tu solicitud a los motorizados disponibles.</Text>
+              <Text style={styles.matchingSubtitle}>
+                {tripStatus === 'CONDUCTOR_EN_CAMINO'
+                  ? 'Tu motorizado ya aceptó y se está dirigiendo al punto de recogida.'
+                  : 'Estamos enviando tu solicitud a los motorizados disponibles.'}
+              </Text>
 
               {requestMetaMessage && <Text style={styles.requestMetaText}>{requestMetaMessage}</Text>}
 
-              <TouchableOpacity style={styles.cancelRequestButton} onPress={handleCancelRequest}>
-                <Text style={styles.cancelRequestButtonText}>Cancelar Solicitud</Text>
-              </TouchableOpacity>
+              {tripStatus !== 'CONDUCTOR_EN_CAMINO' ? (
+                <TouchableOpacity style={styles.cancelRequestButton} onPress={handleCancelRequest}>
+                  <Text style={styles.cancelRequestButtonText}>Cancelar Solicitud</Text>
+                </TouchableOpacity>
+              ) : null}
             </View>
           ) : (
             <>
