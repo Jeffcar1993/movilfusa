@@ -59,6 +59,7 @@ export default function App() {
   const [locationReady, setLocationReady] = useState(false);
   const [locationError, setLocationError] = useState<string | null>(null);
   const [incomingTrip, setIncomingTrip] = useState<TripRecord | null>(null);
+  const [isTripCardCollapsed, setIsTripCardCollapsed] = useState(false);
   const [acceptingTrip, setAcceptingTrip] = useState(false);
   const [acceptanceMessage, setAcceptanceMessage] = useState<string | null>(null);
   const alertedTripIdRef = useRef<string | null>(null);
@@ -108,6 +109,7 @@ export default function App() {
       }
 
       setIncomingTrip(payload.trip);
+      setIsTripCardCollapsed(false);
       setAcceptanceMessage(null);
 
       if (alertedTripIdRef.current !== payload.trip.id && payload.trip.status === 'PENDING') {
@@ -162,6 +164,14 @@ export default function App() {
 
   const serviceLabel = incomingTrip?.serviceType === 'encomienda' ? 'Encomienda' : 'Pasajero';
   const serviceIcon = incomingTrip?.serviceType === 'encomienda' ? 'package-variant-closed' : 'motorbike';
+  const driverStatusLabel =
+    incomingTrip?.status === 'CONDUCTOR_EN_CAMINO' ? 'Viaje aceptado' : incomingTrip ? 'Viaje entrante' : 'Disponible';
+  const driverStatusDotStyle =
+    incomingTrip?.status === 'CONDUCTOR_EN_CAMINO'
+      ? styles.statusAccepted
+      : incomingTrip
+        ? styles.statusBusy
+        : styles.statusAvailable;
 
   return (
     <SafeAreaProvider>
@@ -171,11 +181,11 @@ export default function App() {
       <View style={styles.header}>
         <View>
           <Text style={styles.kicker}>MovilFusa Driver</Text>
-          <Text style={styles.title}>Panel del conductor</Text>
+          <Text style={styles.title}>Conductor</Text>
         </View>
         <View style={styles.statusPill}>
-          <View style={[styles.statusDot, incomingTrip ? styles.statusBusy : styles.statusAvailable]} />
-          <Text style={styles.statusText}>{incomingTrip ? 'Viaje entrante' : 'Disponible'}</Text>
+          <View style={[styles.statusDot, driverStatusDotStyle]} />
+          <Text style={styles.statusText}>{driverStatusLabel}</Text>
         </View>
       </View>
 
@@ -221,49 +231,74 @@ export default function App() {
       <View style={styles.bottomPanel}>
         {incomingTrip ? (
           <View style={styles.tripCard}>
-            <View style={styles.alertBadge}>
-              <MaterialCommunityIcons name="bell-ring" size={18} color="#7C2D12" />
-              <Text style={styles.alertBadgeText}>Viaje entrante</Text>
-            </View>
-
-            <View style={styles.tripMetricRow}>
-              <Text style={styles.tripMetricLabel}>¿A dónde va?</Text>
-              <Text style={styles.tripMetricValue}>{incomingTrip.destination.name}</Text>
-            </View>
-
-            <View style={styles.tripMetricRow}>
-              <Text style={styles.tripMetricLabel}>¿Cuánto gana?</Text>
-              <Text style={styles.tripFare}>{formatCop(incomingTrip.fare)}</Text>
-            </View>
-
-            <View style={styles.serviceRow}>
-              <View style={styles.serviceChip}>
-                <MaterialCommunityIcons name={serviceIcon} size={22} color="#0F172A" />
-                <Text style={styles.serviceChipText}>{serviceLabel}</Text>
+            <View style={styles.tripCardHeader}>
+              <View style={styles.alertBadge}>
+                <MaterialCommunityIcons name="bell-ring" size={18} color="#7C2D12" />
+                <Text style={styles.alertBadgeText}>{incomingTrip.status === 'CONDUCTOR_EN_CAMINO' ? 'Viaje aceptado' : 'Viaje entrante'}</Text>
               </View>
-              {incomingTrip.serviceType === 'encomienda' && incomingTrip.packageNotes ? (
-                <Text style={styles.packageNote}>{incomingTrip.packageNotes}</Text>
-              ) : (
-                <Text style={styles.packageNote}>1 pasajero, casco reglamentario.</Text>
-              )}
+              <TouchableOpacity
+                style={styles.collapseButton}
+                onPress={() => setIsTripCardCollapsed((currentValue) => !currentValue)}
+                activeOpacity={0.8}
+              >
+                <MaterialCommunityIcons
+                  name={isTripCardCollapsed ? 'chevron-up' : 'chevron-down'}
+                  size={24}
+                  color="#7C2D12"
+                />
+              </TouchableOpacity>
             </View>
 
-            <TouchableOpacity
-              style={[styles.acceptButton, acceptingTrip && styles.acceptButtonDisabled]}
-              onPress={handleAcceptTrip}
-              disabled={acceptingTrip || incomingTrip.status === 'CONDUCTOR_EN_CAMINO'}
-              activeOpacity={0.9}
-            >
-              {acceptingTrip ? (
-                <ActivityIndicator color="#FFF7ED" />
-              ) : (
-                <Text style={styles.acceptButtonText}>
-                  {incomingTrip.status === 'CONDUCTOR_EN_CAMINO' ? 'VIAJE ACEPTADO' : 'ACEPTAR VIAJE'}
-                </Text>
-              )}
-            </TouchableOpacity>
+            {isTripCardCollapsed ? (
+              <View style={styles.collapsedSummaryRow}>
+                <View style={styles.collapsedSummaryTextBlock}>
+                  <Text style={styles.tripMetricLabel}>Destino</Text>
+                  <Text style={styles.collapsedDestinationText}>{incomingTrip.destination.name}</Text>
+                </View>
+                <Text style={styles.collapsedFareText}>{formatCop(incomingTrip.fare)}</Text>
+              </View>
+            ) : (
+              <>
+                <View style={styles.tripMetricRow}>
+                  <Text style={styles.tripMetricLabel}>¿A dónde va?</Text>
+                  <Text style={styles.tripMetricValue}>{incomingTrip.destination.name}</Text>
+                </View>
 
-            {acceptanceMessage ? <Text style={styles.acceptanceMessage}>{acceptanceMessage}</Text> : null}
+                <View style={styles.tripMetricRow}>
+                  <Text style={styles.tripMetricLabel}>¿Cuánto gana?</Text>
+                  <Text style={styles.tripFare}>{formatCop(incomingTrip.fare)}</Text>
+                </View>
+
+                <View style={styles.serviceRow}>
+                  <View style={styles.serviceChip}>
+                    <MaterialCommunityIcons name={serviceIcon} size={22} color="#0F172A" />
+                    <Text style={styles.serviceChipText}>{serviceLabel}</Text>
+                  </View>
+                  {incomingTrip.serviceType === 'encomienda' && incomingTrip.packageNotes ? (
+                    <Text style={styles.packageNote}>{incomingTrip.packageNotes}</Text>
+                  ) : (
+                    <Text style={styles.packageNote}>1 pasajero, casco reglamentario.</Text>
+                  )}
+                </View>
+
+                <TouchableOpacity
+                  style={[styles.acceptButton, acceptingTrip && styles.acceptButtonDisabled]}
+                  onPress={handleAcceptTrip}
+                  disabled={acceptingTrip || incomingTrip.status === 'CONDUCTOR_EN_CAMINO'}
+                  activeOpacity={0.9}
+                >
+                  {acceptingTrip ? (
+                    <ActivityIndicator color="#FFF7ED" />
+                  ) : (
+                    <Text style={styles.acceptButtonText}>
+                      {incomingTrip.status === 'CONDUCTOR_EN_CAMINO' ? 'VIAJE ACEPTADO' : 'ACEPTAR VIAJE'}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+
+                {acceptanceMessage ? <Text style={styles.acceptanceMessage}>{acceptanceMessage}</Text> : null}
+              </>
+            )}
           </View>
         ) : (
           <View style={styles.idleCard}>
@@ -320,6 +355,9 @@ const styles = StyleSheet.create({
   },
   statusAvailable: {
     backgroundColor: '#22C55E',
+  },
+  statusAccepted: {
+    backgroundColor: '#14B8A6',
   },
   statusBusy: {
     backgroundColor: '#F97316',
@@ -391,6 +429,11 @@ const styles = StyleSheet.create({
     padding: 20,
     gap: 14,
   },
+  tripCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
   alertBadge: {
     alignSelf: 'flex-start',
     flexDirection: 'row',
@@ -406,6 +449,33 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     fontSize: 12,
     textTransform: 'uppercase',
+  },
+  collapseButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FED7AA',
+  },
+  collapsedSummaryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 12,
+  },
+  collapsedSummaryTextBlock: {
+    flex: 1,
+  },
+  collapsedDestinationText: {
+    color: '#0F172A',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  collapsedFareText: {
+    color: '#C2410C',
+    fontSize: 24,
+    fontWeight: '900',
   },
   tripMetricRow: {
     gap: 4,

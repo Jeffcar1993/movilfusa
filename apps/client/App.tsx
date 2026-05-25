@@ -210,7 +210,7 @@ export default function App() {
 
       if (trip.status === 'CONDUCTOR_EN_CAMINO') {
         setRequestMetaMessage(
-          `${trip.driver?.name ?? 'Un conductor'} aceptó tu solicitud y va en camino${trip.driver?.plate ? ` · Placa ${trip.driver.plate}` : ''}.`,
+          `${trip.driver?.name ?? 'Un conductor'} aceptó tu solicitud y va en camino en ${trip.driver?.vehicle ?? 'su vehículo'}${trip.driver?.plate ? ` · Placa ${trip.driver.plate}` : ''}.`,
         );
         return;
       }
@@ -447,7 +447,11 @@ export default function App() {
         
         {origin && destination && (
           <Text style={styles.routeMetaText}>
-            {loadingRoute ? 'Calculando ruta...' : routeInfo ? `⏱️ ${Math.round(routeInfo.durationMin)} min · 🛣️ ${routeInfo.distanceKm.toFixed(1)} km` : 'Línea recta'}
+            {loadingRoute
+              ? 'Calculando ruta...'
+              : routeInfo
+                ? `⏱️ ${Math.round(routeInfo.durationMin)} min · 🛣️ ${routeInfo.distanceKm.toFixed(1)} km · 💰 ${formatCop(computedFare ?? 5000)}`
+                : `Línea recta · 💰 ${formatCop(computedFare ?? 5000)}`}
           </Text>
         )}
       </View>
@@ -484,7 +488,11 @@ export default function App() {
               <Text style={styles.matchingTitle}>
                 {tripStatus === 'CONDUCTOR_EN_CAMINO' ? 'Conductor confirmado' : 'Buscando conductor cercano...'}
               </Text>
-              <ActivityIndicator size="large" color="#10B981" style={styles.matchingLoader} />
+
+              {tripStatus !== 'CONDUCTOR_EN_CAMINO' ? (
+                <ActivityIndicator size="large" color="#10B981" style={styles.matchingLoader} />
+              ) : null}
+
               <Text style={styles.matchingSubtitle}>
                 {tripStatus === 'CONDUCTOR_EN_CAMINO'
                   ? 'Tu motorizado ya aceptó y se está dirigiendo al punto de recogida.'
