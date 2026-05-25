@@ -10,6 +10,9 @@ import {
   TextInput,
   Animated,
   Easing,
+  ScrollView,
+  Alert,
+  Image,
 } from 'react-native';
 import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
@@ -18,6 +21,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { StatusBar } from 'expo-status-bar';
 import { io, type Socket } from 'socket.io-client';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as ImagePicker from 'expo-image-picker';
 
 type ServiceType = 'pasajero' | 'encomienda';
 type TripStatus = 'PENDING' | 'CONDUCTOR_EN_CAMINO' | 'EN_VIAJE' | 'FINALIZADO' | 'CANCELADO';
@@ -78,6 +82,8 @@ interface DriverRegistrationProfile {
   registrationComplete: boolean;
 }
 
+type DriverProfileSection = 'menu' | 'details' | 'history';
+
 const fallbackApiBaseUrl = Platform.select({
   android: 'http://10.0.2.2:3000',
   default: 'http://localhost:3000',
@@ -93,6 +99,7 @@ const defaultRegion = {
 
 const DRIVER_SESSION_KEY = 'movilfusa:driver:session';
 const DRIVER_PROFILE_PREFIX = 'movilfusa:driver:profile:';
+const getDriverProfileKey = (identifier: string) => `${DRIVER_PROFILE_PREFIX}${identifier}`;
 
 const formatCop = (value: number) => `$${value.toLocaleString('es-CO')}`;
 
@@ -124,6 +131,10 @@ export default function App() {
   const [isTripCardCollapsed, setIsTripCardCollapsed] = useState(false);
   const [acceptingTrip, setAcceptingTrip] = useState(false);
   const [acceptanceMessage, setAcceptanceMessage] = useState<string | null>(null);
+  const [showProfileScreen, setShowProfileScreen] = useState(false);
+  const [driverProfileSection, setDriverProfileSection] = useState<DriverProfileSection>('menu');
+  const [driverTripHistory, setDriverTripHistory] = useState<TripRecord[]>([]);
+  const [loadingDriverHistory, setLoadingDriverHistory] = useState(false);
   const alertedTripIdRef = useRef<string | null>(null);
   const socketRef = useRef<Socket | null>(null);
 
@@ -167,6 +178,7 @@ export default function App() {
         try {
           const parsedSession = JSON.parse(sessionRaw) as DriverSession;
           setSession(parsedSession);
+          void loadDriverProfile(parsedSession.identifier);
           setEntryStep('home');
         } catch {
           setEntryStep('login');
@@ -211,6 +223,7 @@ export default function App() {
     }
 
     setSession(nextSession);
+    void loadDriverProfile(identifier);
     setEntryStep('home');
     setAuthFeedback(null);
   };
@@ -224,19 +237,11 @@ export default function App() {
   const handleStartGoogleAuth = async () => {
     const provider: AuthProvider = 'google';
     const identifier = resolveIdentifier(provider);
-    const profileRaw = await AsyncStorage.getItem(`${DRIVER_PROFILE_PREFIX}${identifier}`);
+    const profile = await loadDriverProfile(identifier);
 
-    if (profileRaw) {
-      try {
-        const profile = JSON.parse(profileRaw) as DriverRegistrationProfile;
-        setRegistration(profile);
-        if (profile.registrationComplete) {
-          await openHomeWithSession(provider, identifier, profile.name);
-          return;
-        }
-      } catch {
-        // Continue to profile creation.
-      }
+    if (profile?.registrationComplete) {
+      await openHomeWithSession(provider, identifier, profile.name);
+      return;
     }
 
     moveToDriverProfile(provider);
@@ -262,19 +267,11 @@ export default function App() {
     }
 
     const identifier = resolveIdentifier('phone');
-    const profileRaw = await AsyncStorage.getItem(`${DRIVER_PROFILE_PREFIX}${identifier}`);
+    const profile = await loadDriverProfile(identifier);
 
-    if (profileRaw) {
-      try {
-        const profile = JSON.parse(profileRaw) as DriverRegistrationProfile;
-        setRegistration(profile);
-        if (profile.registrationComplete) {
-          await openHomeWithSession('phone', identifier, profile.name);
-          return;
-        }
-      } catch {
-        // Continue with profile + wizard.
-      }
+    if (profile?.registrationComplete) {
+      await openHomeWithSession('phone', identifier, profile.name);
+      return;
     }
 
     moveToDriverProfile('phone');
@@ -322,7 +319,7 @@ export default function App() {
       return;
     }
 
-    await AsyncStorage.setItem(`${DRIVER_PROFILE_PREFIX}${identifier}`, JSON.stringify(completedProfile));
+    await saveDriverProfile(identifier, completedProfile);
     await openHomeWithSession(authProvider, identifier, completedProfile.name);
   };
 
@@ -341,12 +338,132 @@ export default function App() {
     };
 
     try {
-      await AsyncStorage.setItem(`${DRIVER_PROFILE_PREFIX}${identifier}`, JSON.stringify(profile));
+      await saveDriverProfile(identifier, profile);
     } catch {
       // Continue with transient demo access.
     }
 
     await openHomeWithSession(provider, identifier, profile.name);
+  };
+
+  const loadDriverProfile = async (identifier: string): Promise<DriverRegistrationProfile | null> => {
+    const profileRaw = await AsyncStorage.getItem(getDriverProfileKey(identifier));
+    if (!profileRaw) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(profileRaw) as DriverRegistrationProfile;
+      setRegistration(parsed);
+      return parsed;
+    } catch {
+      return null;
+    }
+  };
+
+  const saveDriverProfile = async (identifier: string, profile: DriverRegistrationProfile) => {
+    await AsyncStorage.setItem(getDriverProfileKey(identifier), JSON.stringify(profile));
+    setRegistration(profile);
+  };
+
+  const handleLogout = async () => {
+    try {
+      await AsyncStorage.removeItem(DRIVER_SESSION_KEY);
+    } catch {
+      // Continue with in-memory cleanup.
+    }
+
+    setSession(null);
+    setShowProfileScreen(false);
+    setDriverProfileSection('menu');
+    setEntryStep('login');
+  };
+
+  const handleDeleteAccount = () => {
+    if (!session) {
+      return;
+    }
+
+    Alert.alert(
+      'Eliminar cuenta',
+      'Esta acción es permanente y cerrará tu sesión de conductor.',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Eliminar',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await fetch(`${API_BASE_URL}/api/driver/account/${session.identifier}`, {
+                method: 'DELETE',
+              });
+            } catch {
+              // Continue local cleanup even if backend is unavailable.
+            }
+
+            try {
+              await AsyncStorage.removeItem(DRIVER_SESSION_KEY);
+              await AsyncStorage.removeItem(getDriverProfileKey(session.identifier));
+            } catch {
+              // Continue with in-memory cleanup.
+            }
+
+            setSession(null);
+            setShowProfileScreen(false);
+            setDriverProfileSection('menu');
+            setEntryStep('login');
+          },
+        },
+      ],
+    );
+  };
+
+  const handlePickDriverPhoto = async () => {
+    if (!session) {
+      return;
+    }
+
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      setAuthFeedback('Debes habilitar galería para subir foto de perfil.');
+      return;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsEditing: true,
+      quality: 0.7,
+      aspect: [1, 1],
+    });
+
+    if (result.canceled || !result.assets[0]?.uri) {
+      return;
+    }
+
+    const updatedProfile: DriverRegistrationProfile = {
+      ...registration,
+      profilePhotoUrl: result.assets[0].uri,
+    };
+
+    await saveDriverProfile(session.identifier, updatedProfile);
+  };
+
+  const loadDriverHistory = async () => {
+    if (!session?.identifier) {
+      setDriverTripHistory([]);
+      return;
+    }
+
+    setLoadingDriverHistory(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/driver/trips/history/${session.identifier}`);
+      const data = (await response.json()) as { trips?: TripRecord[] };
+      setDriverTripHistory(Array.isArray(data.trips) ? data.trips : []);
+    } catch {
+      setDriverTripHistory([]);
+    } finally {
+      setLoadingDriverHistory(false);
+    }
   };
 
   useEffect(() => {
@@ -817,6 +934,125 @@ export default function App() {
           ? 'FINALIZAR VIAJE'
           : 'VIAJE FINALIZADO';
 
+  if (showProfileScreen) {
+    return (
+      <SafeAreaProvider>
+        <SafeAreaView style={styles.driverProfileScreen}>
+          <View style={styles.driverProfileHeader}>
+            <TouchableOpacity
+              style={styles.driverProfileBackButton}
+              onPress={() => {
+                if (driverProfileSection === 'menu') {
+                  setShowProfileScreen(false);
+                  return;
+                }
+                setDriverProfileSection('menu');
+              }}
+            >
+              <MaterialCommunityIcons name="chevron-left" size={22} color="#0F172A" />
+            </TouchableOpacity>
+            <Text style={styles.driverProfileTitle}>Perfil conductor</Text>
+            <View style={{ width: 36 }} />
+          </View>
+
+          {driverProfileSection === 'menu' ? (
+            <View style={styles.driverProfileMenuBody}>
+              <TouchableOpacity style={styles.driverProfileMenuItem} onPress={() => setDriverProfileSection('details')}>
+                <MaterialCommunityIcons name="card-account-details-outline" size={20} color="#EA580C" />
+                <Text style={styles.driverProfileMenuText}>Perfil</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.driverProfileMenuItem}
+                onPress={() => {
+                  setDriverProfileSection('history');
+                  void loadDriverHistory();
+                }}
+              >
+                <MaterialCommunityIcons name="history" size={20} color="#0F172A" />
+                <Text style={styles.driverProfileMenuText}>Historial de viajes</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.driverProfileMenuItem} onPress={handleLogout}>
+                <MaterialCommunityIcons name="logout" size={20} color="#B45309" />
+                <Text style={styles.driverProfileMenuText}>Cerrar sesión</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.driverProfileMenuItemDanger} onPress={handleDeleteAccount}>
+                <MaterialCommunityIcons name="delete-alert-outline" size={20} color="#B91C1C" />
+                <Text style={styles.driverProfileMenuDangerText}>Eliminar cuenta permanentemente</Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
+
+          {driverProfileSection === 'details' ? (
+            <ScrollView contentContainerStyle={styles.driverProfileDetailsBody}>
+              <TouchableOpacity style={styles.driverPhotoWrap} onPress={() => void handlePickDriverPhoto()}>
+                {registration.profilePhotoUrl ? (
+                  <Image source={{ uri: registration.profilePhotoUrl }} style={styles.driverProfilePhoto} />
+                ) : (
+                  <View style={styles.driverProfilePhotoPlaceholder}>
+                    <MaterialCommunityIcons name="account" size={34} color="#334155" />
+                  </View>
+                )}
+                <Text style={styles.driverPhotoCta}>Subir o cambiar foto</Text>
+              </TouchableOpacity>
+
+              <View style={styles.driverReadonlyRow}>
+                <Text style={styles.driverReadonlyLabel}>Nombre</Text>
+                <Text style={styles.driverReadonlyValue}>{registration.name || session?.name || 'Sin dato'}</Text>
+              </View>
+              <View style={styles.driverReadonlyRow}>
+                <Text style={styles.driverReadonlyLabel}>Teléfono</Text>
+                <Text style={styles.driverReadonlyValue}>{registration.phone ?? 'No aplica'}</Text>
+              </View>
+              <View style={styles.driverReadonlyRow}>
+                <Text style={styles.driverReadonlyLabel}>Modelo de moto</Text>
+                <Text style={styles.driverReadonlyValue}>{registration.motorcycleModel || 'Sin dato'}</Text>
+              </View>
+              <View style={styles.driverReadonlyRow}>
+                <Text style={styles.driverReadonlyLabel}>Placa</Text>
+                <Text style={styles.driverReadonlyValue}>{registration.plate || 'Sin dato'}</Text>
+              </View>
+              <View style={styles.driverReadonlyRow}>
+                <Text style={styles.driverReadonlyLabel}>Documento</Text>
+                <Text style={styles.driverReadonlyValue}>{registration.documentId || 'Sin dato'}</Text>
+              </View>
+              <View style={styles.driverReadonlyRow}>
+                <Text style={styles.driverReadonlyLabel}>Licencia</Text>
+                <Text style={styles.driverReadonlyValue}>{registration.licenseNumber || 'Sin dato'}</Text>
+              </View>
+
+              <Text style={styles.driverReadonlyFootnote}>Los datos personales no se pueden modificar después del registro.</Text>
+            </ScrollView>
+          ) : null}
+
+          {driverProfileSection === 'history' ? (
+            <View style={styles.driverProfileHistoryBody}>
+              {loadingDriverHistory ? (
+                <ActivityIndicator color="#EA580C" style={{ marginTop: 24 }} />
+              ) : (
+                <ScrollView contentContainerStyle={{ gap: 10, paddingBottom: 12 }}>
+                  {driverTripHistory.length === 0 ? (
+                    <Text style={styles.profileEmptyText}>Aún no tienes viajes en tu historial de conductor.</Text>
+                  ) : (
+                    driverTripHistory.map((trip) => (
+                      <View key={trip.id} style={styles.profileTripItem}>
+                        <Text style={styles.profileTripPrimary}>Viaje {trip.id.slice(-6)}</Text>
+                        <Text style={styles.profileTripMeta}>Estado: {trip.status}</Text>
+                        <Text style={styles.profileTripMeta}>Ganancia: {formatCop(trip.fare)}</Text>
+                      </View>
+                    ))
+                  )}
+                </ScrollView>
+              )}
+            </View>
+          ) : null}
+        </SafeAreaView>
+      </SafeAreaProvider>
+    );
+  }
+
   return (
     <SafeAreaProvider>
     <SafeAreaView style={styles.screen}>
@@ -827,9 +1063,21 @@ export default function App() {
           <Text style={styles.kicker}>MovilFusa Driver</Text>
           <Text style={styles.title}>Conductor</Text>
         </View>
-        <View style={styles.statusPill}>
-          <View style={[styles.statusDot, driverStatusDotStyle]} />
-          <Text style={styles.statusText}>{driverStatusLabel}</Text>
+        <View style={styles.headerRightArea}>
+          <TouchableOpacity
+            style={styles.profileButton}
+            onPress={() => {
+              setDriverProfileSection('menu');
+              setShowProfileScreen(true);
+            }}
+          >
+            <MaterialCommunityIcons name="account-circle" size={18} color="#0F172A" />
+            <Text style={styles.profileButtonText}>Perfil</Text>
+          </TouchableOpacity>
+          <View style={styles.statusPill}>
+            <View style={[styles.statusDot, driverStatusDotStyle]} />
+            <Text style={styles.statusText}>{driverStatusLabel}</Text>
+          </View>
         </View>
       </View>
 
@@ -973,6 +1221,7 @@ export default function App() {
           </View>
         )}
       </View>
+
     </SafeAreaView>
     </SafeAreaProvider>
   );
@@ -1195,6 +1444,141 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+  },
+  headerRightArea: {
+    alignItems: 'flex-end',
+    gap: 8,
+  },
+  profileButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#E2E8F0',
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  profileButtonText: {
+    color: '#0F172A',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  driverProfileScreen: {
+    flex: 1,
+    backgroundColor: '#F8FAFC',
+    paddingHorizontal: 16,
+    paddingTop: 10,
+  },
+  driverProfileHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 18,
+  },
+  driverProfileBackButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#E2E8F0',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  driverProfileTitle: {
+    color: '#0F172A',
+    fontSize: 22,
+    fontWeight: '900',
+  },
+  driverProfileMenuBody: {
+    gap: 12,
+  },
+  driverProfileMenuItem: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  driverProfileMenuText: {
+    color: '#0F172A',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  driverProfileMenuItemDanger: {
+    backgroundColor: '#FEF2F2',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  driverProfileMenuDangerText: {
+    color: '#B91C1C',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  driverProfileDetailsBody: {
+    paddingBottom: 24,
+  },
+  driverPhotoWrap: {
+    alignItems: 'center',
+    marginBottom: 18,
+  },
+  driverProfilePhoto: {
+    width: 92,
+    height: 92,
+    borderRadius: 46,
+    marginBottom: 10,
+  },
+  driverProfilePhotoPlaceholder: {
+    width: 92,
+    height: 92,
+    borderRadius: 46,
+    backgroundColor: '#E2E8F0',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 10,
+  },
+  driverPhotoCta: {
+    color: '#EA580C',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  driverReadonlyRow: {
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 10,
+  },
+  driverReadonlyLabel: {
+    color: '#64748B',
+    fontWeight: '700',
+    fontSize: 12,
+    marginBottom: 4,
+  },
+  driverReadonlyValue: {
+    color: '#0F172A',
+    fontWeight: '800',
+    fontSize: 14,
+  },
+  driverReadonlyFootnote: {
+    marginTop: 6,
+    color: '#64748B',
+    fontSize: 12,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  driverProfileHistoryBody: {
+    flex: 1,
   },
   kicker: {
     color: '#F97316',
@@ -1430,4 +1814,50 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     fontWeight: '500',
   },
+  profileSheetOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(15, 23, 42, 0.42)',
+    justifyContent: 'flex-end',
+    zIndex: 90,
+  },
+  profileSheetCard: {
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    paddingHorizontal: 18,
+    paddingTop: 14,
+    paddingBottom: 24,
+    maxHeight: '55%',
+  },
+  profileSheetHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  profileSheetTitle: { color: '#0F172A', fontSize: 18, fontWeight: '900' },
+  profileSheetSubtitle: { color: '#475569', marginTop: 2, fontWeight: '600' },
+  profileSheetClose: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#E2E8F0',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  profileTripsScroll: { marginTop: 12 },
+  profileTripItem: {
+    backgroundColor: '#FFF7ED',
+    borderWidth: 1,
+    borderColor: '#FED7AA',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  profileTripPrimary: { color: '#7C2D12', fontWeight: '800', fontSize: 13, marginBottom: 3 },
+  profileTripMeta: { color: '#9A3412', fontWeight: '600', fontSize: 12 },
+  profileEmptyText: { color: '#64748B', textAlign: 'center', fontWeight: '600', marginTop: 10 },
 });

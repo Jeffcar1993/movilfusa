@@ -20,6 +20,11 @@ interface DriverProfile {
   plate: string;
 }
 
+interface ClientProfile {
+  id: string;
+  name: string;
+}
+
 interface DriverLocation {
   latitude: number;
   longitude: number;
@@ -45,6 +50,10 @@ interface CreateTripRequestBody {
   fare?: number;
   serviceType?: ServiceType;
   packageNotes?: string;
+  client?: {
+    id?: string;
+    name?: string;
+  };
 }
 
 interface DriverLocationRequestBody {
@@ -69,6 +78,7 @@ interface TripRecord {
   acceptedAt?: string;
   startedAt?: string;
   finishedAt?: string;
+  client?: ClientProfile;
   driver?: DriverProfile;
   currentDriverLocation?: DriverLocation;
   rating?: TripRating;
@@ -134,7 +144,7 @@ app.get('/api/health', (req: Request, res: Response) => {
 });
 
 app.post('/api/trips', (req: Request, res: Response) => {
-  const { origin, destination, fare, serviceType, packageNotes } = req.body as CreateTripRequestBody;
+  const { origin, destination, fare, serviceType, packageNotes, client } = req.body as CreateTripRequestBody;
   const resolvedServiceType: ServiceType = serviceType === 'encomienda' ? 'encomienda' : 'pasajero';
 
   if (
@@ -166,6 +176,14 @@ app.post('/api/trips', (req: Request, res: Response) => {
     serviceType: resolvedServiceType,
     status: 'PENDING',
     createdAt: new Date().toISOString(),
+    ...(typeof client?.id === 'string' && typeof client?.name === 'string'
+      ? {
+          client: {
+            id: client.id,
+            name: client.name,
+          },
+        }
+      : {}),
     ...(resolvedServiceType === 'encomienda' ? { packageNotes: packageNotes ?? '' } : {}),
   };
 
@@ -193,6 +211,49 @@ app.get('/api/trips/:tripId', (req: Request, res: Response) => {
   }
 
   res.json({ trip });
+});
+
+app.get('/api/client/trips/:clientId', (req: Request, res: Response) => {
+  const clientId = getTripIdFromParams(req.params.clientId);
+
+  if (!clientId) {
+    return res.status(400).json({ message: 'Identificador de cliente inválido.' });
+  }
+
+  const clientTrips = Array.from(trips.values())
+    .filter((trip) => trip.client?.id === clientId)
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  res.json({ trips: clientTrips });
+});
+
+app.delete('/api/client/account/:clientId', (req: Request, res: Response) => {
+  const clientId = getTripIdFromParams(req.params.clientId);
+
+  if (!clientId) {
+    return res.status(400).json({ message: 'Identificador de cliente inválido.' });
+  }
+
+  trips.forEach((trip, tripId) => {
+    if (trip.client?.id !== clientId) {
+      return;
+    }
+
+    const updatedTrip: TripRecord = {
+      ...trip,
+      status: trip.status === 'PENDING' ? 'CANCELADO' : trip.status,
+      client: {
+        id: `${clientId}-deleted`,
+        name: 'Cuenta eliminada',
+      },
+    };
+
+    trips.set(tripId, updatedTrip);
+    emitTripUpdate(updatedTrip);
+  });
+
+  emitDriverQueueUpdate();
+  res.json({ message: 'Cuenta de cliente eliminada de forma permanente.' });
 });
 
 app.post('/api/trips/:tripId/cancel', (req: Request, res: Response) => {
@@ -231,6 +292,51 @@ app.get('/api/driver/trips/next', (req: Request, res: Response) => {
   }
 
   res.json({ trip: pendingTrip });
+});
+
+app.get('/api/driver/trips/history/:driverId', (req: Request, res: Response) => {
+  const driverId = getTripIdFromParams(req.params.driverId);
+
+  if (!driverId) {
+    return res.status(400).json({ message: 'Identificador de conductor inválido.' });
+  }
+
+  const driverTrips = Array.from(trips.values())
+    .filter((trip) => trip.driver?.id === driverId)
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  res.json({ trips: driverTrips });
+});
+
+app.delete('/api/driver/account/:driverId', (req: Request, res: Response) => {
+  const driverId = getTripIdFromParams(req.params.driverId);
+
+  if (!driverId) {
+    return res.status(400).json({ message: 'Identificador de conductor inválido.' });
+  }
+
+  trips.forEach((trip, tripId) => {
+    if (trip.driver?.id !== driverId) {
+      return;
+    }
+
+    const updatedTrip: TripRecord = {
+      ...trip,
+      status: trip.status === 'CONDUCTOR_EN_CAMINO' ? 'CANCELADO' : trip.status,
+      driver: {
+        id: `${driverId}-deleted`,
+        name: 'Cuenta eliminada',
+        vehicle: 'No disponible',
+        plate: 'N/A',
+      },
+    };
+
+    trips.set(tripId, updatedTrip);
+    emitTripUpdate(updatedTrip);
+  });
+
+  emitDriverQueueUpdate();
+  res.json({ message: 'Cuenta de conductor eliminada de forma permanente.' });
 });
 
 app.post('/api/driver/trips/:tripId/accept', (req: Request, res: Response) => {

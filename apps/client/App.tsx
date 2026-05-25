@@ -11,9 +11,14 @@ import {
   Keyboard,
   Animated,
   Easing,
+  ScrollView,
+  Alert,
+  Image,
+  Vibration,
 } from 'react-native';
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE, type LatLng } from 'react-native-maps';
 import * as Location from 'expo-location';
+import * as ImagePicker from 'expo-image-picker';
 import { io, type Socket } from 'socket.io-client';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
@@ -79,6 +84,17 @@ interface ClientSession {
   name: string;
 }
 
+interface ClientRegistrationProfile {
+  name: string;
+  phone?: string;
+  provider: AuthProvider;
+  identifier: string;
+  profilePhotoUrl?: string;
+  registrationComplete: boolean;
+}
+
+type ProfileSection = 'menu' | 'details' | 'history';
+
 type TripPoint = {
   latitude: number;
   longitude: number;
@@ -97,6 +113,7 @@ const API_BASE_URL = (process.env.EXPO_PUBLIC_API_URL ?? fallbackApiBaseUrl).rep
 const formatCop = (fare: number) => `$${fare.toLocaleString('es-CO')} COP`;
 const CLIENT_SESSION_KEY = 'movilfusa:client:session';
 const CLIENT_PROFILE_PREFIX = 'movilfusa:client:profile:';
+const getClientProfileKey = (identifier: string) => `${CLIENT_PROFILE_PREFIX}${identifier}`;
 
 export default function App() {
   const [location, setLocation] = useState<Location.LocationObject | null>(null);
@@ -133,9 +150,15 @@ export default function App() {
   const [submittingRating, setSubmittingRating] = useState(false);
   const [ratingSubmitted, setRatingSubmitted] = useState(false);
   const [keyboardOffset, setKeyboardOffset] = useState(0);
+  const [showProfileScreen, setShowProfileScreen] = useState(false);
+  const [profileSection, setProfileSection] = useState<ProfileSection>('menu');
+  const [clientTripHistory, setClientTripHistory] = useState<TripRecord[]>([]);
+  const [loadingClientHistory, setLoadingClientHistory] = useState(false);
+  const [clientProfile, setClientProfile] = useState<ClientRegistrationProfile | null>(null);
   const mapRef = useRef<MapView | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const currentTripIdRef = useRef<string | null>(null);
+  const notifiedAcceptedTripIdRef = useRef<string | null>(null);
 
   const fallbackRouteCoordinates: LatLng[] = origin && destination
     ? [
@@ -143,6 +166,112 @@ export default function App() {
         { latitude: destination.latitude, longitude: destination.longitude },
       ]
     : [];
+
+  const saveClientProfile = async (profile: ClientRegistrationProfile) => {
+    await AsyncStorage.setItem(getClientProfileKey(profile.identifier), JSON.stringify(profile));
+    setClientProfile(profile);
+  };
+
+  const loadClientProfile = async (identifier: string): Promise<ClientRegistrationProfile | null> => {
+    const profileRaw = await AsyncStorage.getItem(getClientProfileKey(identifier));
+    if (!profileRaw) {
+      setClientProfile(null);
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(profileRaw) as ClientRegistrationProfile;
+      setClientProfile(parsed);
+      return parsed;
+    } catch {
+      setClientProfile(null);
+      return null;
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await AsyncStorage.removeItem(CLIENT_SESSION_KEY);
+    } catch {
+      // Keep UX responsive even if storage fails.
+    }
+
+    setSession(null);
+    setClientProfile(null);
+    setShowProfileScreen(false);
+    setProfileSection('menu');
+    setEntryStep('login');
+  };
+
+  const handleDeleteAccount = () => {
+    if (!session) {
+      return;
+    }
+
+    Alert.alert(
+      'Eliminar cuenta',
+      'Esta acción es permanente y cerrará tu sesión.',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Eliminar',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await fetch(`${API_BASE_URL}/api/client/account/${session.identifier}`, {
+                method: 'DELETE',
+              });
+            } catch {
+              // Account cleanup continues locally even if backend is unavailable.
+            }
+
+            try {
+              await AsyncStorage.removeItem(CLIENT_SESSION_KEY);
+              await AsyncStorage.removeItem(getClientProfileKey(session.identifier));
+            } catch {
+              // Continue with in-memory cleanup.
+            }
+
+            setSession(null);
+            setClientProfile(null);
+            setShowProfileScreen(false);
+            setProfileSection('menu');
+            setEntryStep('login');
+          },
+        },
+      ],
+    );
+  };
+
+  const handlePickProfilePhoto = async () => {
+    if (!clientProfile) {
+      return;
+    }
+
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      setAuthFeedback('Debes habilitar galería para subir foto de perfil.');
+      return;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsEditing: true,
+      quality: 0.7,
+      aspect: [1, 1],
+    });
+
+    if (result.canceled || !result.assets[0]?.uri) {
+      return;
+    }
+
+    const updatedProfile: ClientRegistrationProfile = {
+      ...clientProfile,
+      profilePhotoUrl: result.assets[0].uri,
+    };
+
+    await saveClientProfile(updatedProfile);
+  };
 
   const visibleRouteCoordinates = routeCoordinates.length > 1 ? routeCoordinates : fallbackRouteCoordinates;
 
@@ -222,6 +351,7 @@ export default function App() {
           const parsedSession = JSON.parse(savedSessionRaw) as ClientSession;
           if (parsedSession?.identifier && parsedSession?.name) {
             setSession(parsedSession);
+            void loadClientProfile(parsedSession.identifier);
             setEntryStep('home');
             return;
           }
@@ -311,6 +441,7 @@ export default function App() {
     }
 
     setSession(nextSession);
+    void loadClientProfile(identifier);
     setAuthFeedback(null);
     setEntryStep('home');
   };
@@ -318,19 +449,12 @@ export default function App() {
   const handleStartGoogleAuth = async () => {
     const provider: AuthProvider = 'google';
     const identifier = resolveIdentifier(provider);
-    const profileRaw = await AsyncStorage.getItem(`${CLIENT_PROFILE_PREFIX}${identifier}`);
+    const profile = await loadClientProfile(identifier);
 
     setAuthProvider(provider);
-    if (profileRaw) {
-      try {
-        const profile = JSON.parse(profileRaw) as { name?: string };
-        if (profile?.name) {
-          await persistSessionAndOpenHome(provider, identifier, profile.name);
-          return;
-        }
-      } catch {
-        // Fall back to profile creation.
-      }
+    if (profile?.name) {
+      await persistSessionAndOpenHome(provider, identifier, profile.name);
+      return;
     }
 
     setProfileName('');
@@ -358,18 +482,11 @@ export default function App() {
     }
 
     const identifier = resolveIdentifier('phone');
-    const profileRaw = await AsyncStorage.getItem(`${CLIENT_PROFILE_PREFIX}${identifier}`);
+    const profile = await loadClientProfile(identifier);
 
-    if (profileRaw) {
-      try {
-        const profile = JSON.parse(profileRaw) as { name?: string };
-        if (profile?.name) {
-          await persistSessionAndOpenHome('phone', identifier, profile.name);
-          return;
-        }
-      } catch {
-        // Fall back to profile creation.
-      }
+    if (profile?.name) {
+      await persistSessionAndOpenHome('phone', identifier, profile.name);
+      return;
     }
 
     setProfileName('');
@@ -385,10 +502,15 @@ export default function App() {
     }
 
     const identifier = resolveIdentifier(authProvider);
-    await AsyncStorage.setItem(
-      `${CLIENT_PROFILE_PREFIX}${identifier}`,
-      JSON.stringify({ name: trimmedName, role: 'cliente' }),
-    );
+    const nextProfile: ClientRegistrationProfile = {
+      name: trimmedName,
+      provider: authProvider,
+      identifier,
+      phone: authProvider === 'phone' ? phoneNumber.replace(/\D/g, '') : undefined,
+      profilePhotoUrl: '',
+      registrationComplete: true,
+    };
+    await saveClientProfile(nextProfile);
 
     await persistSessionAndOpenHome(authProvider, identifier, trimmedName);
   };
@@ -408,15 +530,37 @@ export default function App() {
     const demoName = 'Cliente Demo';
 
     try {
-      await AsyncStorage.setItem(
-        `${CLIENT_PROFILE_PREFIX}${identifier}`,
-        JSON.stringify({ name: demoName, role: 'cliente' }),
-      );
+      await saveClientProfile({
+        name: demoName,
+        provider,
+        identifier,
+        phone: '3000000000',
+        profilePhotoUrl: '',
+        registrationComplete: true,
+      });
     } catch {
       // Continue with transient demo access.
     }
 
     await persistSessionAndOpenHome(provider, identifier, demoName);
+  };
+
+  const loadClientHistory = async () => {
+    if (!session?.identifier) {
+      setClientTripHistory([]);
+      return;
+    }
+
+    setLoadingClientHistory(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/client/trips/${session.identifier}`);
+      const data = (await response.json()) as { trips?: TripRecord[] };
+      setClientTripHistory(Array.isArray(data.trips) ? data.trips : []);
+    } catch {
+      setClientTripHistory([]);
+    } finally {
+      setLoadingClientHistory(false);
+    }
   };
 
   useEffect(() => {
@@ -486,6 +630,7 @@ export default function App() {
     setRatingStars(0);
     setRatingMessage('');
     setRatingSubmitted(false);
+    notifiedAcceptedTripIdRef.current = null;
   }, [origin, destination]);
 
   useEffect(() => {
@@ -521,6 +666,15 @@ export default function App() {
       }
 
       if (trip.status === 'CONDUCTOR_EN_CAMINO') {
+        if (notifiedAcceptedTripIdRef.current !== trip.id) {
+          notifiedAcceptedTripIdRef.current = trip.id;
+          Vibration.vibrate([0, 220, 120, 220]);
+          Alert.alert(
+            'Conductor aceptó tu viaje',
+            `${trip.driver?.name ?? 'Tu conductor'} va en camino${trip.driver?.plate ? ` · Placa ${trip.driver.plate}` : ''}.`,
+          );
+        }
+
         setRequestMetaMessage(
           `${trip.driver?.name ?? 'Un conductor'} aceptó tu solicitud y va en camino en ${trip.driver?.vehicle ?? 'su vehículo'}${trip.driver?.plate ? ` · Placa ${trip.driver.plate}` : ''}.`,
         );
@@ -614,6 +768,7 @@ export default function App() {
     setRatingStars(0);
     setRatingMessage('');
     setRatingSubmitted(false);
+    notifiedAcceptedTripIdRef.current = null;
 
     try {
       const response = await fetch(`${API_BASE_URL}/api/trips`, {
@@ -635,6 +790,14 @@ export default function App() {
           fare: computedFare,
           serviceType: destination.serviceType ?? 'pasajero',
           packageNotes: destination.packageNotes,
+          ...(session
+            ? {
+                client: {
+                  id: session.identifier,
+                  name: session.name,
+                },
+              }
+            : {}),
         }),
       });
 
@@ -690,6 +853,7 @@ export default function App() {
     setRatingStars(0);
     setRatingMessage('');
     setRatingSubmitted(false);
+    notifiedAcceptedTripIdRef.current = null;
   };
 
   const handleSubmitRating = async () => {
@@ -922,10 +1086,133 @@ export default function App() {
     );
   }
 
+  if (showProfileScreen) {
+    return (
+      <View style={styles.profileScreenRoot}>
+        <View style={styles.profileScreenHeader}>
+          <TouchableOpacity
+            style={styles.profileBackButton}
+            onPress={() => {
+              if (profileSection === 'menu') {
+                setShowProfileScreen(false);
+                return;
+              }
+              setProfileSection('menu');
+            }}
+          >
+            <MaterialCommunityIcons name="chevron-left" size={22} color="#0F172A" />
+          </TouchableOpacity>
+          <Text style={styles.profileScreenTitle}>Perfil</Text>
+          <View style={{ width: 36 }} />
+        </View>
+
+        {profileSection === 'menu' ? (
+          <View style={styles.profileMenuBody}>
+            <TouchableOpacity style={styles.profileMenuItem} onPress={() => setProfileSection('details')}>
+              <MaterialCommunityIcons name="account-box-outline" size={20} color="#0F766E" />
+              <Text style={styles.profileMenuText}>Perfil</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.profileMenuItem}
+              onPress={() => {
+                setProfileSection('history');
+                void loadClientHistory();
+              }}
+            >
+              <MaterialCommunityIcons name="history" size={20} color="#1E3A8A" />
+              <Text style={styles.profileMenuText}>Historial de viajes</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.profileMenuItem} onPress={handleLogout}>
+              <MaterialCommunityIcons name="logout" size={20} color="#B45309" />
+              <Text style={styles.profileMenuText}>Cerrar sesión</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.profileMenuItemDanger} onPress={handleDeleteAccount}>
+              <MaterialCommunityIcons name="delete-alert-outline" size={20} color="#B91C1C" />
+              <Text style={styles.profileMenuDangerText}>Eliminar cuenta permanentemente</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
+
+        {profileSection === 'details' ? (
+          <ScrollView contentContainerStyle={styles.profileDetailsBody}>
+            <TouchableOpacity style={styles.profilePhotoWrap} onPress={() => void handlePickProfilePhoto()}>
+              {clientProfile?.profilePhotoUrl ? (
+                <Image source={{ uri: clientProfile.profilePhotoUrl }} style={styles.profilePhoto} />
+              ) : (
+                <View style={styles.profilePhotoPlaceholder}>
+                  <MaterialCommunityIcons name="account" size={34} color="#334155" />
+                </View>
+              )}
+              <Text style={styles.profilePhotoCta}>Subir o cambiar foto</Text>
+            </TouchableOpacity>
+
+            <View style={styles.readonlyRow}>
+              <Text style={styles.readonlyLabel}>Nombre</Text>
+              <Text style={styles.readonlyValue}>{clientProfile?.name ?? session?.name ?? 'Sin dato'}</Text>
+            </View>
+            <View style={styles.readonlyRow}>
+              <Text style={styles.readonlyLabel}>Proveedor</Text>
+              <Text style={styles.readonlyValue}>{clientProfile?.provider === 'phone' ? 'Teléfono' : 'Google'}</Text>
+            </View>
+            <View style={styles.readonlyRow}>
+              <Text style={styles.readonlyLabel}>Teléfono</Text>
+              <Text style={styles.readonlyValue}>{clientProfile?.phone ?? 'No aplica'}</Text>
+            </View>
+            <View style={styles.readonlyRow}>
+              <Text style={styles.readonlyLabel}>ID de cuenta</Text>
+              <Text style={styles.readonlyValue}>{session?.identifier ?? 'Sin dato'}</Text>
+            </View>
+
+            <Text style={styles.readonlyFootnote}>Los datos personales no se pueden modificar después del registro.</Text>
+          </ScrollView>
+        ) : null}
+
+        {profileSection === 'history' ? (
+          <View style={styles.profileHistoryBody}>
+            {loadingClientHistory ? (
+              <ActivityIndicator color="#0F766E" style={{ marginTop: 24 }} />
+            ) : (
+              <ScrollView contentContainerStyle={{ gap: 10, paddingBottom: 12 }}>
+                {clientTripHistory.length === 0 ? (
+                  <Text style={styles.profileEmptyText}>Aún no tienes viajes en tu historial.</Text>
+                ) : (
+                  clientTripHistory.map((trip) => (
+                    <View key={trip.id} style={styles.profileTripItem}>
+                      <Text style={styles.profileTripPrimary}>Viaje {trip.id.slice(-6)}</Text>
+                      <Text style={styles.profileTripMeta}>Estado: {trip.status}</Text>
+                      <Text style={styles.profileTripMeta}>Valor: {formatCop(trip.fare)}</Text>
+                    </View>
+                  ))
+                )}
+              </ScrollView>
+            )}
+          </View>
+        ) : null}
+      </View>
+    );
+  }
+
   return (
     <View style={styles.homeContainer}>
       {/* Campos superiores de ruteo */}
       <View style={styles.topFieldsContainer}>
+        <View style={styles.topActionsRow}>
+          <Text style={styles.topWelcomeText}>Hola, {session?.name ?? 'Cliente'}</Text>
+          <TouchableOpacity
+            style={styles.profileButton}
+            onPress={() => {
+              setProfileSection('menu');
+              setShowProfileScreen(true);
+            }}
+          >
+            <MaterialCommunityIcons name="account-circle" size={18} color="#0F172A" />
+            <Text style={styles.profileButtonText}>Perfil</Text>
+          </TouchableOpacity>
+        </View>
+
         <View style={styles.inputRow}>
           <TouchableOpacity style={styles.inputField} onPress={() => setSearchMode('origin')}>
             <Text style={[styles.inputLabel, { color: origin ? '#1E3A8A' : '#94A3B8' }]}>¿Dónde estás?</Text>
@@ -1300,6 +1587,135 @@ const styles = StyleSheet.create({
   errorText: { color: '#EF4444', fontSize: 16, padding: 20, textAlign: 'center' },
   
   topFieldsContainer: { position: 'absolute', top: 50, left: 16, right: 16, zIndex: 10, backgroundColor: '#fff', borderRadius: 20, padding: 14, elevation: 8, shadowColor: '#1E3A8A', shadowOpacity: 0.15, shadowRadius: 8 },
+  topActionsRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
+  topWelcomeText: { color: '#334155', fontWeight: '700', fontSize: 12 },
+  profileButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#E2E8F0',
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  profileButtonText: { color: '#0F172A', fontSize: 12, fontWeight: '800' },
+  profileScreenRoot: {
+    flex: 1,
+    backgroundColor: '#F8FAFC',
+    paddingTop: 56,
+    paddingHorizontal: 16,
+  },
+  profileScreenHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 18,
+  },
+  profileBackButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#E2E8F0',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  profileScreenTitle: {
+    color: '#0F172A',
+    fontSize: 22,
+    fontWeight: '900',
+  },
+  profileMenuBody: {
+    gap: 12,
+  },
+  profileMenuItem: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  profileMenuText: {
+    color: '#0F172A',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  profileMenuItemDanger: {
+    backgroundColor: '#FEF2F2',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  profileMenuDangerText: {
+    color: '#B91C1C',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  profileDetailsBody: {
+    paddingBottom: 24,
+  },
+  profilePhotoWrap: {
+    alignItems: 'center',
+    marginBottom: 18,
+  },
+  profilePhoto: {
+    width: 92,
+    height: 92,
+    borderRadius: 46,
+    marginBottom: 10,
+  },
+  profilePhotoPlaceholder: {
+    width: 92,
+    height: 92,
+    borderRadius: 46,
+    backgroundColor: '#E2E8F0',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 10,
+  },
+  profilePhotoCta: {
+    color: '#0F766E',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  readonlyRow: {
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 10,
+  },
+  readonlyLabel: {
+    color: '#64748B',
+    fontWeight: '700',
+    fontSize: 12,
+    marginBottom: 4,
+  },
+  readonlyValue: {
+    color: '#0F172A',
+    fontWeight: '800',
+    fontSize: 14,
+  },
+  readonlyFootnote: {
+    marginTop: 6,
+    color: '#64748B',
+    fontSize: 12,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  profileHistoryBody: {
+    flex: 1,
+  },
   inputRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
   inputField: { flex: 1, paddingVertical: 8, paddingHorizontal: 12, backgroundColor: '#F1F5F9', borderRadius: 10 },
   inputLabel: { fontSize: 11, fontWeight: '700', marginBottom: 2, textTransform: 'uppercase' },
@@ -1310,6 +1726,18 @@ const styles = StyleSheet.create({
   
   embeddedGpsButton: { marginBottom: 12, backgroundColor: '#1E3A8A', borderRadius: 12, padding: 12, alignItems: 'center' },
   embeddedGpsText: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
+
+  profileTripItem: {
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  profileTripPrimary: { color: '#0F172A', fontWeight: '800', fontSize: 13, marginBottom: 3 },
+  profileTripMeta: { color: '#475569', fontWeight: '600', fontSize: 12 },
+  profileEmptyText: { color: '#64748B', textAlign: 'center', fontWeight: '600', marginTop: 10 },
 
   confirmTripContainer: { position: 'absolute', left: 16, right: 16, bottom: 30, backgroundColor: '#FFFFFF', borderRadius: 24, padding: 20, elevation: 12, shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.15, shadowRadius: 10, zIndex: 30 },
   serviceTypeBadge: { alignSelf: 'flex-start', marginBottom: 10, backgroundColor: '#FEF3C7', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6 },
