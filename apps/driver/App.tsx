@@ -8,7 +8,7 @@ import { StatusBar } from 'expo-status-bar';
 import { io, type Socket } from 'socket.io-client';
 
 type ServiceType = 'pasajero' | 'encomienda';
-type TripStatus = 'PENDING' | 'CONDUCTOR_EN_CAMINO' | 'CANCELADO';
+type TripStatus = 'PENDING' | 'CONDUCTOR_EN_CAMINO' | 'EN_VIAJE' | 'FINALIZADO' | 'CANCELADO';
 
 interface TripPoint {
   latitude: number;
@@ -32,6 +32,13 @@ interface TripRecord {
   packageNotes?: string;
   status: TripStatus;
   driver?: DriverProfile;
+  startedAt?: string;
+  finishedAt?: string;
+  currentDriverLocation?: {
+    latitude: number;
+    longitude: number;
+    updatedAt: string;
+  };
 }
 
 interface DriverTripResponse {
@@ -104,7 +111,11 @@ export default function App() {
 
     const handleDriverTrip = (payload: DriverTripResponse) => {
       if (!payload.trip) {
-        setIncomingTrip((currentTrip) => (currentTrip?.status === 'CONDUCTOR_EN_CAMINO' ? currentTrip : null));
+        setIncomingTrip((currentTrip) =>
+          currentTrip && (currentTrip.status === 'CONDUCTOR_EN_CAMINO' || currentTrip.status === 'EN_VIAJE')
+            ? currentTrip
+            : null,
+        );
         return;
       }
 
@@ -162,16 +173,120 @@ export default function App() {
     }
   };
 
+  const handleTripAction = async (action: 'start' | 'finish') => {
+    if (!incomingTrip || acceptingTrip) {
+      return;
+    }
+
+    setAcceptingTrip(true);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/driver/trips/${incomingTrip.id}/${action}`, {
+        method: 'POST',
+      });
+
+      const data = (await response.json()) as DriverTripResponse;
+
+      if (!response.ok || !data.trip) {
+        throw new Error(data.message ?? 'No fue posible actualizar el viaje.');
+      }
+
+      if (action === 'finish') {
+        setIncomingTrip(null);
+        setIsTripCardCollapsed(false);
+        setAcceptanceMessage(null);
+      } else {
+        setIncomingTrip(data.trip);
+        setAcceptanceMessage('Viaje iniciado. Compartiendo ubicación en tiempo real.');
+      }
+    } catch {
+      setAcceptanceMessage('No se pudo actualizar el estado del viaje. Intenta de nuevo.');
+    } finally {
+      setAcceptingTrip(false);
+    }
+  };
+
+  const handleStartTrip = async () => {
+    await handleTripAction('start');
+  };
+
+  const handleFinishTrip = async () => {
+    await handleTripAction('finish');
+  };
+
+  useEffect(() => {
+    if (!incomingTrip || incomingTrip.status !== 'EN_VIAJE') {
+      return;
+    }
+
+    let isCancelled = false;
+
+    const sendLocationUpdate = async () => {
+      try {
+        const currentLocation = await Location.getCurrentPositionAsync({});
+
+        if (isCancelled) {
+          return;
+        }
+
+        setDriverLocation({
+          latitude: currentLocation.coords.latitude,
+          longitude: currentLocation.coords.longitude,
+          latitudeDelta: 0.018,
+          longitudeDelta: 0.018,
+        });
+
+        await fetch(`${API_BASE_URL}/api/driver/trips/${incomingTrip.id}/location`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            latitude: currentLocation.coords.latitude,
+            longitude: currentLocation.coords.longitude,
+          }),
+        });
+      } catch {
+        // Keep ride active even if a location push fails.
+      }
+    };
+
+    sendLocationUpdate();
+    const interval = setInterval(sendLocationUpdate, 4000);
+
+    return () => {
+      isCancelled = true;
+      clearInterval(interval);
+    };
+  }, [incomingTrip?.id, incomingTrip?.status]);
+
   const serviceLabel = incomingTrip?.serviceType === 'encomienda' ? 'Encomienda' : 'Pasajero';
   const serviceIcon = incomingTrip?.serviceType === 'encomienda' ? 'package-variant-closed' : 'motorbike';
   const driverStatusLabel =
-    incomingTrip?.status === 'CONDUCTOR_EN_CAMINO' ? 'Viaje aceptado' : incomingTrip ? 'Viaje entrante' : 'Disponible';
-  const driverStatusDotStyle =
     incomingTrip?.status === 'CONDUCTOR_EN_CAMINO'
+      ? 'Viaje aceptado'
+      : incomingTrip?.status === 'EN_VIAJE'
+        ? 'En viaje'
+        : incomingTrip?.status === 'FINALIZADO'
+          ? 'Viaje finalizado'
+          : incomingTrip
+            ? 'Viaje entrante'
+            : 'Disponible';
+  const driverStatusDotStyle =
+    incomingTrip?.status === 'CONDUCTOR_EN_CAMINO' || incomingTrip?.status === 'EN_VIAJE'
       ? styles.statusAccepted
       : incomingTrip
         ? styles.statusBusy
         : styles.statusAvailable;
+
+  const actionButtonLabel =
+    incomingTrip?.status === 'PENDING'
+      ? 'ACEPTAR VIAJE'
+      : incomingTrip?.status === 'CONDUCTOR_EN_CAMINO'
+        ? 'INICIAR VIAJE'
+        : incomingTrip?.status === 'EN_VIAJE'
+          ? 'FINALIZAR VIAJE'
+          : 'VIAJE FINALIZADO';
 
   return (
     <SafeAreaProvider>
@@ -205,12 +320,21 @@ export default function App() {
               pinColor="#F97316"
             />
 
-            {incomingTrip ? (
+            {incomingTrip && incomingTrip.status !== 'EN_VIAJE' ? (
               <Marker
                 coordinate={{ latitude: incomingTrip.origin.latitude, longitude: incomingTrip.origin.longitude }}
                 title="Recogida"
                 description={incomingTrip.origin.name}
                 pinColor="#0F766E"
+              />
+            ) : null}
+
+            {incomingTrip ? (
+              <Marker
+                coordinate={{ latitude: incomingTrip.destination.latitude, longitude: incomingTrip.destination.longitude }}
+                title="Destino"
+                description={incomingTrip.destination.name}
+                pinColor="#2563EB"
               />
             ) : null}
           </MapView>
@@ -234,7 +358,15 @@ export default function App() {
             <View style={styles.tripCardHeader}>
               <View style={styles.alertBadge}>
                 <MaterialCommunityIcons name="bell-ring" size={18} color="#7C2D12" />
-                <Text style={styles.alertBadgeText}>{incomingTrip.status === 'CONDUCTOR_EN_CAMINO' ? 'Viaje aceptado' : 'Viaje entrante'}</Text>
+                <Text style={styles.alertBadgeText}>
+                  {incomingTrip.status === 'CONDUCTOR_EN_CAMINO'
+                    ? 'Viaje aceptado'
+                    : incomingTrip.status === 'EN_VIAJE'
+                      ? 'En curso'
+                      : incomingTrip.status === 'FINALIZADO'
+                        ? 'Finalizado'
+                        : 'Viaje entrante'}
+                </Text>
               </View>
               <TouchableOpacity
                 style={styles.collapseButton}
@@ -283,16 +415,20 @@ export default function App() {
 
                 <TouchableOpacity
                   style={[styles.acceptButton, acceptingTrip && styles.acceptButtonDisabled]}
-                  onPress={handleAcceptTrip}
-                  disabled={acceptingTrip || incomingTrip.status === 'CONDUCTOR_EN_CAMINO'}
+                  onPress={
+                    incomingTrip.status === 'PENDING'
+                      ? handleAcceptTrip
+                      : incomingTrip.status === 'CONDUCTOR_EN_CAMINO'
+                        ? handleStartTrip
+                        : handleFinishTrip
+                  }
+                  disabled={acceptingTrip || incomingTrip.status === 'FINALIZADO'}
                   activeOpacity={0.9}
                 >
                   {acceptingTrip ? (
                     <ActivityIndicator color="#FFF7ED" />
                   ) : (
-                    <Text style={styles.acceptButtonText}>
-                      {incomingTrip.status === 'CONDUCTOR_EN_CAMINO' ? 'VIAJE ACEPTADO' : 'ACEPTAR VIAJE'}
-                    </Text>
+                    <Text style={styles.acceptButtonText}>{actionButtonLabel}</Text>
                   )}
                 </TouchableOpacity>
 

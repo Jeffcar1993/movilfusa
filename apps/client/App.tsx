@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ActivityIndicator, Dimensions, Platform } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, ActivityIndicator, Dimensions, Platform, TextInput, Keyboard } from 'react-native';
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE, type LatLng } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { io, type Socket } from 'socket.io-client';
@@ -12,7 +12,7 @@ interface RouteInfo {
 
 type ServiceType = 'pasajero' | 'encomienda';
 
-type TripStatus = 'PENDING' | 'CONDUCTOR_EN_CAMINO' | 'CANCELADO';
+type TripStatus = 'PENDING' | 'CONDUCTOR_EN_CAMINO' | 'EN_VIAJE' | 'FINALIZADO' | 'CANCELADO';
 
 interface DriverProfile {
   id: string;
@@ -28,12 +28,32 @@ interface TripRecord {
   serviceType: ServiceType;
   packageNotes?: string;
   driver?: DriverProfile;
+  finishedAt?: string;
+  currentDriverLocation?: {
+    latitude: number;
+    longitude: number;
+    updatedAt: string;
+  };
+  rating?: {
+    stars: number;
+    message?: string;
+    createdAt: string;
+  };
 }
 
 interface CreateTripResponse {
   trip?: TripRecord | null;
   packageNotes?: string;
   message?: string;
+}
+
+interface DriverLocationEvent {
+  tripId: string;
+  location: {
+    latitude: number;
+    longitude: number;
+    updatedAt: string;
+  };
 }
 
 type TripPoint = {
@@ -72,6 +92,13 @@ export default function App() {
   const [requestMetaMessage, setRequestMetaMessage] = useState<string | null>(null);
   const [currentTripId, setCurrentTripId] = useState<string | null>(null);
   const [tripStatus, setTripStatus] = useState<TripStatus | null>(null);
+  const [activeTrip, setActiveTrip] = useState<TripRecord | null>(null);
+  const [driverLiveLocation, setDriverLiveLocation] = useState<LatLng | null>(null);
+  const [ratingStars, setRatingStars] = useState(0);
+  const [ratingMessage, setRatingMessage] = useState('');
+  const [submittingRating, setSubmittingRating] = useState(false);
+  const [ratingSubmitted, setRatingSubmitted] = useState(false);
+  const [keyboardOffset, setKeyboardOffset] = useState(0);
   const mapRef = useRef<MapView | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const currentTripIdRef = useRef<string | null>(null);
@@ -182,6 +209,11 @@ export default function App() {
     setIsMatching(false);
     setCurrentTripId(null);
     setTripStatus(null);
+    setActiveTrip(null);
+    setDriverLiveLocation(null);
+    setRatingStars(0);
+    setRatingMessage('');
+    setRatingSubmitted(false);
   }, [origin, destination]);
 
   useEffect(() => {
@@ -206,7 +238,15 @@ export default function App() {
         return;
       }
 
+      setActiveTrip(trip);
       setTripStatus(trip.status);
+
+      if (trip.currentDriverLocation) {
+        setDriverLiveLocation({
+          latitude: trip.currentDriverLocation.latitude,
+          longitude: trip.currentDriverLocation.longitude,
+        });
+      }
 
       if (trip.status === 'CONDUCTOR_EN_CAMINO') {
         setRequestMetaMessage(
@@ -215,11 +255,34 @@ export default function App() {
         return;
       }
 
+      if (trip.status === 'EN_VIAJE') {
+        setRequestMetaMessage('Tu viaje está en curso. Sigues al conductor en tiempo real.');
+        return;
+      }
+
+      if (trip.status === 'FINALIZADO') {
+        setRequestMetaMessage('Viaje finalizado. ¿Cómo estuvo tu experiencia?');
+        return;
+      }
+
       if (trip.status === 'CANCELADO') {
         setRequestMetaMessage('La solicitud fue cancelada.');
         setIsMatching(false);
         setCurrentTripId(null);
+        setActiveTrip(null);
+        setDriverLiveLocation(null);
       }
+    };
+
+    const handleDriverLocation = (payload: DriverLocationEvent) => {
+      if (payload.tripId !== currentTripIdRef.current) {
+        return;
+      }
+
+      setDriverLiveLocation({
+        latitude: payload.location.latitude,
+        longitude: payload.location.longitude,
+      });
     };
 
     const handleConnectionError = () => {
@@ -229,11 +292,13 @@ export default function App() {
     socketRef.current = socket;
     socket.on('connect', subscribeCurrentTrip);
     socket.on('trip:updated', handleTripUpdated);
+    socket.on('driver:location', handleDriverLocation);
     socket.on('connect_error', handleConnectionError);
 
     return () => {
       socket.off('connect', subscribeCurrentTrip);
       socket.off('trip:updated', handleTripUpdated);
+      socket.off('driver:location', handleDriverLocation);
       socket.off('connect_error', handleConnectionError);
       socket.disconnect();
       socketRef.current = null;
@@ -248,6 +313,20 @@ export default function App() {
     socketRef.current?.emit('trip:watch', currentTripId);
   }, [currentTripId, isMatching]);
 
+  useEffect(() => {
+    const showSubscription = Keyboard.addListener('keyboardDidShow', (event) => {
+      setKeyboardOffset(event.endCoordinates.height + 10);
+    });
+    const hideSubscription = Keyboard.addListener('keyboardDidHide', () => {
+      setKeyboardOffset(0);
+    });
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, []);
+
   const handleRequestTrip = async () => {
     if (!origin || !destination || requestingDriver || isMatching || !computedFare) {
       return;
@@ -258,6 +337,11 @@ export default function App() {
     setDriverError(null);
     setRequestMetaMessage(null);
     setTripStatus('PENDING');
+    setActiveTrip(null);
+    setDriverLiveLocation(null);
+    setRatingStars(0);
+    setRatingMessage('');
+    setRatingSubmitted(false);
 
     try {
       const response = await fetch(`${API_BASE_URL}/api/trips`, {
@@ -294,6 +378,7 @@ export default function App() {
       }
 
       setCurrentTripId(data.trip?.id ?? null);
+      setActiveTrip(data.trip ?? null);
       if (data.trip?.id) {
         socketRef.current?.emit('trip:watch', data.trip.id);
       }
@@ -302,6 +387,8 @@ export default function App() {
       setIsMatching(false);
       setCurrentTripId(null);
       setTripStatus(null);
+      setActiveTrip(null);
+      setDriverLiveLocation(null);
     } finally {
       setRequestingDriver(false);
     }
@@ -326,6 +413,61 @@ export default function App() {
     setDriverError(null);
     setCurrentTripId(null);
     setTripStatus(null);
+    setActiveTrip(null);
+    setDriverLiveLocation(null);
+    setRatingStars(0);
+    setRatingMessage('');
+    setRatingSubmitted(false);
+  };
+
+  const handleSubmitRating = async () => {
+    if (!currentTripId || ratingStars < 1 || submittingRating || ratingSubmitted) {
+      return;
+    }
+
+    setSubmittingRating(true);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/trips/${currentTripId}/rating`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          stars: ratingStars,
+          message: ratingMessage,
+        }),
+      });
+
+      const data = (await response.json()) as CreateTripResponse;
+
+      if (!response.ok) {
+        throw new Error(data.message ?? 'No fue posible enviar la calificación.');
+      }
+
+      setActiveTrip(data.trip ?? null);
+      setRatingSubmitted(true);
+
+      // Reset customer screen so it's ready for a fresh request.
+      setIsMatching(false);
+      setCurrentTripId(null);
+      setTripStatus(null);
+      setActiveTrip(null);
+      setDriverLiveLocation(null);
+      setOrigin(null);
+      setDestination(null);
+      setRouteCoordinates([]);
+      setRouteInfo(null);
+      setRequestMetaMessage(null);
+      setDriverError(null);
+      setRatingStars(0);
+      setRatingMessage('');
+      setRatingSubmitted(false);
+    } catch {
+      setDriverError('No se pudo enviar la calificación. Intenta de nuevo.');
+    } finally {
+      setSubmittingRating(false);
+    }
   };
 
   const handleGetStarted = async () => {
@@ -471,6 +613,14 @@ export default function App() {
         >
           {origin && <Marker coordinate={{ latitude: origin.latitude, longitude: origin.longitude }} title={origin.name} pinColor="blue" />}
           {destination && <Marker coordinate={{ latitude: destination.latitude, longitude: destination.longitude }} title="Destino" description={destination.name} pinColor="green" />}
+          {driverLiveLocation && isMatching ? (
+            <Marker
+              coordinate={driverLiveLocation}
+              title={activeTrip?.driver?.name ?? 'Conductor'}
+              description={tripStatus === 'EN_VIAJE' ? 'Viaje en curso' : 'Conductor en camino'}
+              pinColor="#F97316"
+            />
+          ) : null}
           {visibleRouteCoordinates.length > 1 && <Polyline coordinates={visibleRouteCoordinates} strokeColor="#10B981" strokeWidth={5} />}
         </MapView>
       ) : (
@@ -482,31 +632,85 @@ export default function App() {
 
       {/* TARJETA INFERIOR: UI/UX DE CONFIRMACIÓN FINAL */}
       {origin && destination && (
-        <View style={styles.confirmTripContainer}>
+        <View style={[styles.confirmTripContainer, keyboardOffset > 0 && { bottom: keyboardOffset + 12 }] }>
           {isMatching ? (
-            <View style={styles.matchingContainer}>
-              <Text style={styles.matchingTitle}>
-                {tripStatus === 'CONDUCTOR_EN_CAMINO' ? 'Conductor confirmado' : 'Buscando conductor cercano...'}
-              </Text>
+            tripStatus === 'FINALIZADO' ? (
+              <View style={styles.matchingContainer}>
+                <Text style={styles.matchingTitle}>Viaje finalizado</Text>
+                <Text style={styles.matchingSubtitle}>
+                  {activeTrip?.driver?.name ?? 'Tu conductor'} · Placa {activeTrip?.driver?.plate ?? 'N/A'}
+                </Text>
 
-              {tripStatus !== 'CONDUCTOR_EN_CAMINO' ? (
-                <ActivityIndicator size="large" color="#10B981" style={styles.matchingLoader} />
-              ) : null}
+                <View style={styles.starsRow}>
+                  {[1, 2, 3, 4, 5].map((star) => (
+                    <TouchableOpacity key={star} onPress={() => setRatingStars(star)} disabled={ratingSubmitted || submittingRating}>
+                      <Text style={[styles.starButtonText, ratingStars >= star && styles.starButtonActive]}>
+                        {ratingStars >= star ? '★' : '☆'}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
 
-              <Text style={styles.matchingSubtitle}>
-                {tripStatus === 'CONDUCTOR_EN_CAMINO'
-                  ? 'Tu motorizado ya aceptó y se está dirigiendo al punto de recogida.'
-                  : 'Estamos enviando tu solicitud a los motorizados disponibles.'}
-              </Text>
+                <View style={styles.optionalMessageBox}>
+                  <Text style={styles.optionalMessageTitle}>Mensaje opcional</Text>
+                  <TextInput
+                    value={ratingMessage}
+                    onChangeText={setRatingMessage}
+                    editable={!ratingSubmitted && !submittingRating}
+                    placeholder="Escribe un comentario corto (opcional)"
+                    placeholderTextColor="#94A3B8"
+                    style={styles.optionalMessageInput}
+                    multiline
+                    maxLength={180}
+                  />
+                </View>
 
-              {requestMetaMessage && <Text style={styles.requestMetaText}>{requestMetaMessage}</Text>}
-
-              {tripStatus !== 'CONDUCTOR_EN_CAMINO' ? (
-                <TouchableOpacity style={styles.cancelRequestButton} onPress={handleCancelRequest}>
-                  <Text style={styles.cancelRequestButtonText}>Cancelar Solicitud</Text>
+                <TouchableOpacity
+                  style={[styles.ratingSubmitButton, (submittingRating || ratingSubmitted || ratingStars < 1) && styles.disabledButton]}
+                  disabled={submittingRating || ratingSubmitted || ratingStars < 1}
+                  onPress={handleSubmitRating}
+                >
+                  {submittingRating ? (
+                    <ActivityIndicator color="#FFFFFF" />
+                  ) : (
+                    <Text style={styles.ratingSubmitButtonText}>{ratingSubmitted ? 'CALIFICACIÓN ENVIADA' : 'ENVIAR CALIFICACIÓN'}</Text>
+                  )}
                 </TouchableOpacity>
-              ) : null}
-            </View>
+
+                {requestMetaMessage && <Text style={styles.requestMetaText}>{requestMetaMessage}</Text>}
+                {driverError && <Text style={styles.driverErrorText}>{driverError}</Text>}
+              </View>
+            ) : (
+              <View style={styles.matchingContainer}>
+                <Text style={styles.matchingTitle}>
+                  {tripStatus === 'EN_VIAJE'
+                    ? 'Viaje en curso'
+                    : tripStatus === 'CONDUCTOR_EN_CAMINO'
+                      ? 'Conductor confirmado'
+                      : 'Buscando conductor cercano...'}
+                </Text>
+
+                {tripStatus === 'PENDING' ? (
+                  <ActivityIndicator size="large" color="#10B981" style={styles.matchingLoader} />
+                ) : null}
+
+                <Text style={styles.matchingSubtitle}>
+                  {tripStatus === 'EN_VIAJE'
+                    ? 'Sigue el recorrido en el mapa en tiempo real.'
+                    : tripStatus === 'CONDUCTOR_EN_CAMINO'
+                      ? 'Tu motorizado ya aceptó y se está dirigiendo al punto de recogida.'
+                      : 'Estamos enviando tu solicitud a los motorizados disponibles.'}
+                </Text>
+
+                {requestMetaMessage && <Text style={styles.requestMetaText}>{requestMetaMessage}</Text>}
+
+                {tripStatus === 'PENDING' ? (
+                  <TouchableOpacity style={styles.cancelRequestButton} onPress={handleCancelRequest}>
+                    <Text style={styles.cancelRequestButtonText}>Cancelar Solicitud</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+            )
           ) : (
             <>
               <View style={styles.serviceTypeBadge}>
@@ -586,14 +790,53 @@ const styles = StyleSheet.create({
   fareAmount: { fontSize: 22, color: '#0F766E', fontWeight: '900' },
   paymentMethod: { fontSize: 11, color: '#10B981', fontWeight: '700', marginTop: 1 },
   requestButton: { backgroundColor: '#10B981', paddingVertical: 16, borderRadius: 16, alignItems: 'center', elevation: 2 },
+  ratingSubmitButton: {
+    width: '100%',
+    backgroundColor: '#0F766E',
+    paddingVertical: 16,
+    borderRadius: 16,
+    alignItems: 'center',
+    elevation: 4,
+    shadowColor: '#0F766E',
+    shadowOpacity: 0.28,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 5 },
+  },
   disabledButton: { backgroundColor: '#94A3B8' },
   requestButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: 'bold', letterSpacing: 0.5 },
+  ratingSubmitButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: '900', letterSpacing: 0.6 },
   matchingContainer: { alignItems: 'center' },
   matchingTitle: { fontSize: 18, fontWeight: '800', color: '#1E3A8A', textAlign: 'center' },
   matchingLoader: { marginTop: 14, marginBottom: 10 },
   matchingSubtitle: { fontSize: 13, color: '#64748B', textAlign: 'center', fontWeight: '600', lineHeight: 18 },
   cancelRequestButton: { marginTop: 14, backgroundColor: '#EF4444', paddingVertical: 12, paddingHorizontal: 18, borderRadius: 12 },
   cancelRequestButtonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14 },
+  starsRow: { flexDirection: 'row', gap: 8, marginTop: 12, marginBottom: 10 },
+  starButtonText: { fontSize: 34, color: '#94A3B8' },
+  starButtonActive: { color: '#F59E0B' },
+  optionalMessageBox: {
+    width: '100%',
+    marginTop: 6,
+    marginBottom: 12,
+    borderRadius: 12,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 10,
+  },
+  optionalMessageTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#334155',
+    marginBottom: 6,
+  },
+  optionalMessageInput: {
+    minHeight: 60,
+    maxHeight: 110,
+    fontSize: 13,
+    color: '#0F172A',
+    textAlignVertical: 'top',
+  },
   requestMetaText: { marginTop: 10, fontSize: 12, color: '#0F766E', fontWeight: '700', textAlign: 'center' },
   driverErrorText: { marginTop: 10, fontSize: 12, color: '#DC2626', fontWeight: '600', textAlign: 'center' },
 });

@@ -5,7 +5,7 @@ import type { Request, Response } from 'express';
 import type { Server as SocketIOServer, Socket } from 'socket.io';
 
 type ServiceType = 'pasajero' | 'encomienda';
-type TripStatus = 'PENDING' | 'CONDUCTOR_EN_CAMINO' | 'CANCELADO';
+type TripStatus = 'PENDING' | 'CONDUCTOR_EN_CAMINO' | 'EN_VIAJE' | 'FINALIZADO' | 'CANCELADO';
 
 interface TripPoint {
   latitude?: number;
@@ -18,6 +18,18 @@ interface DriverProfile {
   name: string;
   vehicle: string;
   plate: string;
+}
+
+interface DriverLocation {
+  latitude: number;
+  longitude: number;
+  updatedAt: string;
+}
+
+interface TripRating {
+  stars: number;
+  message?: string;
+  createdAt: string;
 }
 
 interface NearbyDriversRequestBody {
@@ -35,6 +47,16 @@ interface CreateTripRequestBody {
   packageNotes?: string;
 }
 
+interface DriverLocationRequestBody {
+  latitude?: number;
+  longitude?: number;
+}
+
+interface TripRatingRequestBody {
+  stars?: number;
+  message?: string;
+}
+
 interface TripRecord {
   id: string;
   origin: Required<TripPoint>;
@@ -45,7 +67,11 @@ interface TripRecord {
   status: TripStatus;
   createdAt: string;
   acceptedAt?: string;
+  startedAt?: string;
+  finishedAt?: string;
   driver?: DriverProfile;
+  currentDriverLocation?: DriverLocation;
+  rating?: TripRating;
 }
 
 const app = express();
@@ -77,6 +103,10 @@ const getNextPendingTrip = (): TripRecord | null =>
 
 const emitTripUpdate = (trip: TripRecord): void => {
   io.to(getTripRoom(trip.id)).emit('trip:updated', { trip });
+};
+
+const emitDriverLocation = (tripId: string, location: DriverLocation): void => {
+  io.to(getTripRoom(tripId)).emit('driver:location', { tripId, location });
 };
 
 const emitDriverQueueUpdate = (): void => {
@@ -178,7 +208,7 @@ app.post('/api/trips/:tripId/cancel', (req: Request, res: Response) => {
     return res.status(404).json({ message: 'Viaje no encontrado.' });
   }
 
-  if (trip.status === 'CONDUCTOR_EN_CAMINO') {
+  if (trip.status === 'CONDUCTOR_EN_CAMINO' || trip.status === 'EN_VIAJE' || trip.status === 'FINALIZADO') {
     return res.status(409).json({ message: 'El viaje ya fue aceptado por un conductor.' });
   }
 
@@ -234,6 +264,156 @@ app.post('/api/driver/trips/:tripId/accept', (req: Request, res: Response) => {
   res.json({
     message: 'Viaje aceptado. Cliente notificado.',
     trip: acceptedTrip,
+  });
+});
+
+app.post('/api/driver/trips/:tripId/start', (req: Request, res: Response) => {
+  const tripId = getTripIdFromParams(req.params.tripId);
+
+  if (!tripId) {
+    return res.status(400).json({ message: 'Identificador de viaje invalido.' });
+  }
+
+  const trip = trips.get(tripId);
+
+  if (!trip) {
+    return res.status(404).json({ message: 'Viaje no encontrado.' });
+  }
+
+  if (trip.status !== 'CONDUCTOR_EN_CAMINO') {
+    return res.status(409).json({ message: 'El viaje no está listo para iniciar.', trip });
+  }
+
+  const startedTrip: TripRecord = {
+    ...trip,
+    status: 'EN_VIAJE',
+    startedAt: new Date().toISOString(),
+  };
+
+  trips.set(startedTrip.id, startedTrip);
+  emitTripUpdate(startedTrip);
+
+  res.json({
+    message: 'Viaje iniciado. Seguimiento en tiempo real activo.',
+    trip: startedTrip,
+  });
+});
+
+app.post('/api/driver/trips/:tripId/location', (req: Request, res: Response) => {
+  const tripId = getTripIdFromParams(req.params.tripId);
+
+  if (!tripId) {
+    return res.status(400).json({ message: 'Identificador de viaje invalido.' });
+  }
+
+  const trip = trips.get(tripId);
+
+  if (!trip) {
+    return res.status(404).json({ message: 'Viaje no encontrado.' });
+  }
+
+  if (trip.status !== 'EN_VIAJE') {
+    return res.status(409).json({ message: 'El viaje no está en curso.', trip });
+  }
+
+  const { latitude, longitude } = req.body as DriverLocationRequestBody;
+
+  if (!isValidCoordinate(latitude) || !isValidCoordinate(longitude)) {
+    return res.status(400).json({ message: 'Ubicación inválida.' });
+  }
+
+  const location: DriverLocation = {
+    latitude,
+    longitude,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const updatedTrip: TripRecord = {
+    ...trip,
+    currentDriverLocation: location,
+  };
+
+  trips.set(updatedTrip.id, updatedTrip);
+  emitDriverLocation(updatedTrip.id, location);
+
+  res.json({ trip: updatedTrip });
+});
+
+app.post('/api/driver/trips/:tripId/finish', (req: Request, res: Response) => {
+  const tripId = getTripIdFromParams(req.params.tripId);
+
+  if (!tripId) {
+    return res.status(400).json({ message: 'Identificador de viaje invalido.' });
+  }
+
+  const trip = trips.get(tripId);
+
+  if (!trip) {
+    return res.status(404).json({ message: 'Viaje no encontrado.' });
+  }
+
+  if (trip.status !== 'EN_VIAJE') {
+    return res.status(409).json({ message: 'El viaje no está en curso.', trip });
+  }
+
+  const finishedTrip: TripRecord = {
+    ...trip,
+    status: 'FINALIZADO',
+    finishedAt: new Date().toISOString(),
+  };
+
+  trips.set(finishedTrip.id, finishedTrip);
+  emitTripUpdate(finishedTrip);
+  emitDriverQueueUpdate();
+
+  res.json({
+    message: 'Viaje finalizado. Cliente notificado.',
+    trip: finishedTrip,
+  });
+});
+
+app.post('/api/trips/:tripId/rating', (req: Request, res: Response) => {
+  const tripId = getTripIdFromParams(req.params.tripId);
+
+  if (!tripId) {
+    return res.status(400).json({ message: 'Identificador de viaje invalido.' });
+  }
+
+  const trip = trips.get(tripId);
+
+  if (!trip) {
+    return res.status(404).json({ message: 'Viaje no encontrado.' });
+  }
+
+  if (trip.status !== 'FINALIZADO') {
+    return res.status(409).json({ message: 'Solo se puede calificar un viaje finalizado.', trip });
+  }
+
+  if (trip.rating) {
+    return res.status(409).json({ message: 'Este viaje ya fue calificado.', trip });
+  }
+
+  const { stars, message } = req.body as TripRatingRequestBody;
+
+  if (typeof stars !== 'number' || !Number.isInteger(stars) || stars < 1 || stars > 5) {
+    return res.status(400).json({ message: 'La calificación debe ser un número entero entre 1 y 5.' });
+  }
+
+  const ratedTrip: TripRecord = {
+    ...trip,
+    rating: {
+      stars,
+      ...(typeof message === 'string' && message.trim().length > 0 ? { message: message.trim() } : {}),
+      createdAt: new Date().toISOString(),
+    },
+  };
+
+  trips.set(ratedTrip.id, ratedTrip);
+  emitTripUpdate(ratedTrip);
+
+  res.json({
+    message: 'Gracias por calificar el viaje.',
+    trip: ratedTrip,
   });
 });
 
