@@ -1,8 +1,22 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ActivityIndicator, Dimensions, Platform, TextInput, Keyboard } from 'react-native';
+import {
+  StyleSheet,
+  Text,
+  View,
+  TouchableOpacity,
+  ActivityIndicator,
+  Dimensions,
+  Platform,
+  TextInput,
+  Keyboard,
+  Animated,
+  Easing,
+} from 'react-native';
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE, type LatLng } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { io, type Socket } from 'socket.io-client';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import AddressSearch from './src/components/AddressSearch';
 
 interface RouteInfo {
@@ -56,6 +70,15 @@ interface DriverLocationEvent {
   };
 }
 
+type AuthProvider = 'google' | 'phone';
+type ClientEntryStep = 'boot' | 'login' | 'otp' | 'profile' | 'home';
+
+interface ClientSession {
+  provider: AuthProvider;
+  identifier: string;
+  name: string;
+}
+
 type TripPoint = {
   latitude: number;
   longitude: number;
@@ -72,11 +95,22 @@ const fallbackApiBaseUrl = Platform.select({
 
 const API_BASE_URL = (process.env.EXPO_PUBLIC_API_URL ?? fallbackApiBaseUrl).replace(/\/$/, '');
 const formatCop = (fare: number) => `$${fare.toLocaleString('es-CO')} COP`;
+const CLIENT_SESSION_KEY = 'movilfusa:client:session';
+const CLIENT_PROFILE_PREFIX = 'movilfusa:client:profile:';
 
 export default function App() {
-  const [currentScreen, setCurrentScreen] = useState<'welcome' | 'home'>('welcome');
   const [location, setLocation] = useState<Location.LocationObject | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [entryStep, setEntryStep] = useState<ClientEntryStep>('boot');
+  const [session, setSession] = useState<ClientSession | null>(null);
+  const [authProvider, setAuthProvider] = useState<AuthProvider | null>(null);
+  const [phoneNumber, setPhoneNumber] = useState('');
+  const [otpCode, setOtpCode] = useState('');
+  const [otpSecondsLeft, setOtpSecondsLeft] = useState(0);
+  const [profileName, setProfileName] = useState('');
+  const [authFeedback, setAuthFeedback] = useState<string | null>(null);
+  const splashOpacity = useRef(new Animated.Value(0)).current;
+  const splashScale = useRef(new Animated.Value(0.95)).current;
   
   // Estados de control de rutas y UI
   const [searchMode, setSearchMode] = useState<'origin' | 'destination' | null>(null);
@@ -146,6 +180,244 @@ export default function App() {
 
     return 5000;
   })();
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const bootstrapSession = async () => {
+      let savedSessionRaw: string | null = null;
+
+      Animated.parallel([
+        Animated.timing(splashOpacity, {
+          toValue: 1,
+          duration: 420,
+          easing: Easing.out(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(splashScale, {
+          toValue: 1,
+          duration: 700,
+          easing: Easing.out(Easing.back(1.2)),
+          useNativeDriver: true,
+        }),
+      ]).start();
+
+      try {
+        savedSessionRaw = await AsyncStorage.getItem(CLIENT_SESSION_KEY);
+      } catch {
+        savedSessionRaw = null;
+      }
+
+      setTimeout(() => {
+        if (!isMounted) {
+          return;
+        }
+
+        if (!savedSessionRaw) {
+          setEntryStep('login');
+          return;
+        }
+
+        try {
+          const parsedSession = JSON.parse(savedSessionRaw) as ClientSession;
+          if (parsedSession?.identifier && parsedSession?.name) {
+            setSession(parsedSession);
+            setEntryStep('home');
+            return;
+          }
+        } catch {
+          // If parsing fails, continue with fresh login.
+        }
+
+        setEntryStep('login');
+      }, 850);
+    };
+
+    bootstrapSession();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [splashOpacity, splashScale]);
+
+  useEffect(() => {
+    if (entryStep !== 'otp' || otpSecondsLeft <= 0) {
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      setOtpSecondsLeft((current) => Math.max(0, current - 1));
+    }, 1000);
+
+    return () => clearTimeout(timeout);
+  }, [entryStep, otpSecondsLeft]);
+
+  useEffect(() => {
+    if (entryStep !== 'home' || location) {
+      return;
+    }
+
+    let isActive = true;
+
+    const requestLocation = async () => {
+      setLoadingGps(true);
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') {
+          if (isActive) {
+            setErrorMsg('Permiso de ubicación denegado.');
+          }
+          return;
+        }
+
+        const currentLocation = await Location.getCurrentPositionAsync({});
+        if (isActive) {
+          setLocation(currentLocation);
+          setErrorMsg(null);
+        }
+      } catch {
+        if (isActive) {
+          setErrorMsg('Error al obtener la ubicación.');
+        }
+      } finally {
+        if (isActive) {
+          setLoadingGps(false);
+        }
+      }
+    };
+
+    requestLocation();
+
+    return () => {
+      isActive = false;
+    };
+  }, [entryStep, location]);
+
+  const resolveIdentifier = (provider: AuthProvider): string => {
+    if (provider === 'google') {
+      return 'google-demo-user';
+    }
+
+    return phoneNumber.replace(/\D/g, '');
+  };
+
+  const persistSessionAndOpenHome = async (provider: AuthProvider, identifier: string, name: string) => {
+    const nextSession: ClientSession = { provider, identifier, name };
+
+    try {
+      await AsyncStorage.setItem(CLIENT_SESSION_KEY, JSON.stringify(nextSession));
+    } catch {
+      // Allow access even if local persistence fails in current session.
+    }
+
+    setSession(nextSession);
+    setAuthFeedback(null);
+    setEntryStep('home');
+  };
+
+  const handleStartGoogleAuth = async () => {
+    const provider: AuthProvider = 'google';
+    const identifier = resolveIdentifier(provider);
+    const profileRaw = await AsyncStorage.getItem(`${CLIENT_PROFILE_PREFIX}${identifier}`);
+
+    setAuthProvider(provider);
+    if (profileRaw) {
+      try {
+        const profile = JSON.parse(profileRaw) as { name?: string };
+        if (profile?.name) {
+          await persistSessionAndOpenHome(provider, identifier, profile.name);
+          return;
+        }
+      } catch {
+        // Fall back to profile creation.
+      }
+    }
+
+    setProfileName('');
+    setEntryStep('profile');
+  };
+
+  const handleStartPhoneAuth = () => {
+    const sanitized = phoneNumber.replace(/\D/g, '');
+    if (sanitized.length < 10) {
+      setAuthFeedback('Ingresa un número de teléfono válido.');
+      return;
+    }
+
+    setAuthFeedback('Código enviado. Revisa tus SMS.');
+    setOtpCode('');
+    setOtpSecondsLeft(35);
+    setAuthProvider('phone');
+    setEntryStep('otp');
+  };
+
+  const handleVerifyOtp = async () => {
+    if (otpCode.length !== 6 || authProvider !== 'phone') {
+      setAuthFeedback('El código OTP debe tener 6 dígitos.');
+      return;
+    }
+
+    const identifier = resolveIdentifier('phone');
+    const profileRaw = await AsyncStorage.getItem(`${CLIENT_PROFILE_PREFIX}${identifier}`);
+
+    if (profileRaw) {
+      try {
+        const profile = JSON.parse(profileRaw) as { name?: string };
+        if (profile?.name) {
+          await persistSessionAndOpenHome('phone', identifier, profile.name);
+          return;
+        }
+      } catch {
+        // Fall back to profile creation.
+      }
+    }
+
+    setProfileName('');
+    setEntryStep('profile');
+    setAuthFeedback('Código validado. Completa tu perfil rápido.');
+  };
+
+  const handleSaveProfile = async () => {
+    const trimmedName = profileName.trim();
+    if (!trimmedName || !authProvider) {
+      setAuthFeedback('Escribe tu nombre para continuar.');
+      return;
+    }
+
+    const identifier = resolveIdentifier(authProvider);
+    await AsyncStorage.setItem(
+      `${CLIENT_PROFILE_PREFIX}${identifier}`,
+      JSON.stringify({ name: trimmedName, role: 'cliente' }),
+    );
+
+    await persistSessionAndOpenHome(authProvider, identifier, trimmedName);
+  };
+
+  const handleResendOtp = () => {
+    if (otpSecondsLeft > 0) {
+      return;
+    }
+
+    setOtpSecondsLeft(35);
+    setAuthFeedback('Nuevo código enviado por SMS.');
+  };
+
+  const handleQuickDemoAccess = async () => {
+    const provider: AuthProvider = 'google';
+    const identifier = 'demo-client-local';
+    const demoName = 'Cliente Demo';
+
+    try {
+      await AsyncStorage.setItem(
+        `${CLIENT_PROFILE_PREFIX}${identifier}`,
+        JSON.stringify({ name: demoName, role: 'cliente' }),
+      );
+    } catch {
+      // Continue with transient demo access.
+    }
+
+    await persistSessionAndOpenHome(provider, identifier, demoName);
+  };
 
   useEffect(() => {
     if (!mapRef.current || visibleRouteCoordinates.length < 2) {
@@ -470,38 +742,129 @@ export default function App() {
     }
   };
 
-  const handleGetStarted = async () => {
-    setLoadingGps(true);
-    try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        setErrorMsg('Permiso de ubicación denegado.');
-        setCurrentScreen('home');
-        return;
-      }
-      const currentLocation = await Location.getCurrentPositionAsync({});
-      setLocation(currentLocation);
-      setCurrentScreen('home');
-    } catch {
-      setErrorMsg('Error al obtener la ubicación.');
-      setCurrentScreen('home');
-    } finally {
-      setLoadingGps(false);
-    }
-  };
-
-  if (currentScreen === 'welcome') {
+  if (entryStep === 'boot') {
     return (
       <View style={styles.welcomeContainer}>
-        <View style={styles.brandContainer}>
+        <Animated.View style={[styles.brandContainer, { opacity: splashOpacity, transform: [{ scale: splashScale }] }]}>
           <Text style={styles.title}>MovilFusa</Text>
-          <Text style={styles.subtitle}>Tu transporte y mensajería de confianza</Text>
+          <Text style={styles.subtitle}>Conecta Fusagasugá en segundos</Text>
+        </Animated.View>
+      </View>
+    );
+  }
+
+  if (entryStep === 'login') {
+    return (
+      <View style={styles.authScreen}>
+        <View style={styles.authHeroCard}>
+          <View style={styles.authHeroIconWrap}>
+            <MaterialCommunityIcons name="map-marker-radius" size={34} color="#0F766E" />
+          </View>
+          <Text style={styles.authTitle}>Bienvenido Cliente</Text>
+          <Text style={styles.authSubtitle}>Ingresa con Google o tu número de teléfono.</Text>
         </View>
-        <View style={styles.bottomContainer}>
-          <TouchableOpacity style={styles.button} onPress={handleGetStarted} disabled={loadingGps}>
-            {loadingGps ? <ActivityIndicator color="#FFFFFF" /> : <Text style={styles.buttonText}>Ingresar con el celular</Text>}
-          </TouchableOpacity>
+
+        <TouchableOpacity style={styles.authPrimaryButton} onPress={handleStartGoogleAuth}>
+          <View style={styles.authButtonContentRow}>
+            <MaterialCommunityIcons name="google" size={20} color="#FFFFFF" />
+            <Text style={styles.authPrimaryButtonText}>Continuar con Google</Text>
+          </View>
+        </TouchableOpacity>
+
+        <Text style={styles.authHint}>o continúa con número</Text>
+
+        <View style={styles.authPhoneInputRow}>
+          <View style={styles.authPhonePrefixBadge}>
+            <Text style={styles.authPhonePrefixText}>+57</Text>
+          </View>
+          <TextInput
+            value={phoneNumber}
+            onChangeText={setPhoneNumber}
+            placeholder="3001234567"
+            placeholderTextColor="#94A3B8"
+            keyboardType="phone-pad"
+            style={styles.authPhoneInput}
+          />
         </View>
+
+        <TouchableOpacity style={styles.authSecondaryButton} onPress={handleStartPhoneAuth}>
+          <View style={styles.authButtonContentRow}>
+            <MaterialCommunityIcons name="cellphone-message" size={19} color="#FFFFFF" />
+            <Text style={styles.authSecondaryButtonText}>Continuar con número de teléfono</Text>
+          </View>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.authDemoButton} onPress={handleQuickDemoAccess}>
+          <MaterialCommunityIcons name="flash" size={18} color="#0F172A" />
+          <Text style={styles.authDemoButtonText}>Entrar rápido para pruebas</Text>
+        </TouchableOpacity>
+
+        {authFeedback ? <Text style={styles.authFeedback}>{authFeedback}</Text> : null}
+      </View>
+    );
+  }
+
+  if (entryStep === 'otp') {
+    return (
+      <View style={styles.authScreen}>
+        <Text style={styles.authTitle}>Verifica tu número</Text>
+        <Text style={styles.authSubtitle}>Ingresa el código OTP de 6 dígitos.</Text>
+
+        <TextInput
+          value={otpCode}
+          onChangeText={(value) => setOtpCode(value.replace(/\D/g, '').slice(0, 6))}
+          placeholder="123456"
+          placeholderTextColor="#94A3B8"
+          keyboardType="number-pad"
+          autoComplete="sms-otp"
+          textContentType="oneTimeCode"
+          maxLength={6}
+          style={styles.authOtpInput}
+        />
+
+        <TouchableOpacity style={styles.authPrimaryButton} onPress={handleVerifyOtp}>
+          <Text style={styles.authPrimaryButtonText}>Verificar código</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.authDemoButton} onPress={() => setOtpCode('123456')}>
+          <MaterialCommunityIcons name="numeric-6-circle" size={18} color="#0F172A" />
+          <Text style={styles.authDemoButtonText}>Usar OTP demo 123456</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.authGhostButton, otpSecondsLeft > 0 && styles.authGhostButtonDisabled]}
+          onPress={handleResendOtp}
+          disabled={otpSecondsLeft > 0}
+        >
+          <Text style={styles.authGhostButtonText}>
+            {otpSecondsLeft > 0 ? `Reenviar en ${otpSecondsLeft}s` : 'Reenviar código'}
+          </Text>
+        </TouchableOpacity>
+
+        {authFeedback ? <Text style={styles.authFeedback}>{authFeedback}</Text> : null}
+      </View>
+    );
+  }
+
+  if (entryStep === 'profile') {
+    return (
+      <View style={styles.authScreen}>
+        <Text style={styles.authTitle}>Completa tu perfil</Text>
+        <Text style={styles.authSubtitle}>Solo te toma unos segundos.</Text>
+
+        <TextInput
+          value={profileName}
+          onChangeText={setProfileName}
+          placeholder="Tu nombre"
+          placeholderTextColor="#94A3B8"
+          style={styles.authInput}
+        />
+
+        <TouchableOpacity style={styles.authPrimaryButton} onPress={handleSaveProfile}>
+          <Text style={styles.authPrimaryButtonText}>Guardar y continuar</Text>
+        </TouchableOpacity>
+
+        {authFeedback ? <Text style={styles.authFeedback}>{authFeedback}</Text> : null}
       </View>
     );
   }
@@ -757,6 +1120,176 @@ const styles = StyleSheet.create({
   brandContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   title: { fontSize: 42, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 1 },
   subtitle: { fontSize: 16, color: '#E2E8F0', marginTop: 10, textAlign: 'center' },
+  authScreen: {
+    flex: 1,
+    backgroundColor: '#F8FAFC',
+    paddingHorizontal: 24,
+    paddingTop: 90,
+  },
+  authHeroCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    paddingHorizontal: 18,
+    paddingVertical: 20,
+    borderWidth: 1,
+    borderColor: '#DBEAFE',
+    shadowColor: '#0F172A',
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 4,
+    marginBottom: 12,
+  },
+  authHeroIconWrap: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: '#CCFBF1',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 10,
+  },
+  authTitle: {
+    fontSize: 30,
+    fontWeight: '900',
+    color: '#0F172A',
+  },
+  authSubtitle: {
+    marginTop: 8,
+    fontSize: 14,
+    color: '#475569',
+    fontWeight: '600',
+  },
+  authHint: {
+    marginTop: 22,
+    marginBottom: 8,
+    color: '#64748B',
+    textAlign: 'center',
+    fontWeight: '700',
+  },
+  authInput: {
+    marginTop: 10,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    color: '#0F172A',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  authPhoneInputRow: {
+    marginTop: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  authPhonePrefixBadge: {
+    backgroundColor: '#E2E8F0',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+  },
+  authPhonePrefixText: {
+    color: '#0F172A',
+    fontWeight: '800',
+  },
+  authPhoneInput: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    color: '#0F172A',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  authOtpInput: {
+    marginTop: 14,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    color: '#0F172A',
+    fontSize: 28,
+    fontWeight: '800',
+    textAlign: 'center',
+    letterSpacing: 8,
+  },
+  authPrimaryButton: {
+    marginTop: 18,
+    backgroundColor: '#0F766E',
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  authPrimaryButtonText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  authButtonContentRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  authSecondaryButton: {
+    marginTop: 12,
+    backgroundColor: '#1E3A8A',
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  authSecondaryButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  authDemoButton: {
+    marginTop: 12,
+    borderRadius: 12,
+    paddingVertical: 11,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    backgroundColor: '#F1F5F9',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 8,
+  },
+  authDemoButtonText: {
+    color: '#0F172A',
+    fontWeight: '800',
+    fontSize: 13,
+  },
+  authGhostButton: {
+    marginTop: 12,
+    borderRadius: 12,
+    paddingVertical: 10,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#94A3B8',
+  },
+  authGhostButtonDisabled: {
+    opacity: 0.55,
+  },
+  authGhostButtonText: {
+    color: '#334155',
+    fontWeight: '700',
+  },
+  authFeedback: {
+    marginTop: 12,
+    textAlign: 'center',
+    color: '#0F766E',
+    fontWeight: '700',
+  },
   bottomContainer: { marginBottom: 40 },
   button: { backgroundColor: '#10B981', paddingVertical: 16, borderRadius: 12, alignItems: 'center', elevation: 5 },
   buttonText: { color: '#FFFFFF', fontSize: 18, fontWeight: 'bold' },

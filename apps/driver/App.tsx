@@ -1,11 +1,23 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Platform, StyleSheet, Text, TouchableOpacity, Vibration, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Platform,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  Vibration,
+  View,
+  TextInput,
+  Animated,
+  Easing,
+} from 'react-native';
 import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { StatusBar } from 'expo-status-bar';
 import { io, type Socket } from 'socket.io-client';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type ServiceType = 'pasajero' | 'encomienda';
 type TripStatus = 'PENDING' | 'CONDUCTOR_EN_CAMINO' | 'EN_VIAJE' | 'FINALIZADO' | 'CANCELADO';
@@ -46,6 +58,26 @@ interface DriverTripResponse {
   message?: string;
 }
 
+type AuthProvider = 'google' | 'phone';
+type DriverEntryStep = 'boot' | 'login' | 'otp' | 'profile' | 'wizard' | 'home';
+
+interface DriverSession {
+  provider: AuthProvider;
+  identifier: string;
+  name: string;
+}
+
+interface DriverRegistrationProfile {
+  name: string;
+  phone?: string;
+  motorcycleModel: string;
+  plate: string;
+  documentId: string;
+  licenseNumber: string;
+  profilePhotoUrl?: string;
+  registrationComplete: boolean;
+}
+
 const fallbackApiBaseUrl = Platform.select({
   android: 'http://10.0.2.2:3000',
   default: 'http://localhost:3000',
@@ -59,9 +91,32 @@ const defaultRegion = {
   longitudeDelta: 0.018,
 };
 
+const DRIVER_SESSION_KEY = 'movilfusa:driver:session';
+const DRIVER_PROFILE_PREFIX = 'movilfusa:driver:profile:';
+
 const formatCop = (value: number) => `$${value.toLocaleString('es-CO')}`;
 
 export default function App() {
+  const [entryStep, setEntryStep] = useState<DriverEntryStep>('boot');
+  const [session, setSession] = useState<DriverSession | null>(null);
+  const [authProvider, setAuthProvider] = useState<AuthProvider | null>(null);
+  const [phoneNumber, setPhoneNumber] = useState('');
+  const [otpCode, setOtpCode] = useState('');
+  const [otpSecondsLeft, setOtpSecondsLeft] = useState(0);
+  const [authFeedback, setAuthFeedback] = useState<string | null>(null);
+  const [profileName, setProfileName] = useState('');
+  const [wizardStep, setWizardStep] = useState(0);
+  const [registration, setRegistration] = useState<DriverRegistrationProfile>({
+    name: '',
+    motorcycleModel: '',
+    plate: '',
+    documentId: '',
+    licenseNumber: '',
+    profilePhotoUrl: '',
+    registrationComplete: false,
+  });
+  const splashOpacity = useRef(new Animated.Value(0)).current;
+  const splashScale = useRef(new Animated.Value(0.95)).current;
   const [driverLocation, setDriverLocation] = useState(defaultRegion);
   const [locationReady, setLocationReady] = useState(false);
   const [locationError, setLocationError] = useState<string | null>(null);
@@ -73,6 +128,232 @@ export default function App() {
   const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
+    let isMounted = true;
+
+    const bootstrap = async () => {
+      let sessionRaw: string | null = null;
+
+      Animated.parallel([
+        Animated.timing(splashOpacity, {
+          toValue: 1,
+          duration: 420,
+          easing: Easing.out(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(splashScale, {
+          toValue: 1,
+          duration: 700,
+          easing: Easing.out(Easing.back(1.2)),
+          useNativeDriver: true,
+        }),
+      ]).start();
+
+      try {
+        sessionRaw = await AsyncStorage.getItem(DRIVER_SESSION_KEY);
+      } catch {
+        sessionRaw = null;
+      }
+
+      setTimeout(() => {
+        if (!isMounted) {
+          return;
+        }
+
+        if (!sessionRaw) {
+          setEntryStep('login');
+          return;
+        }
+
+        try {
+          const parsedSession = JSON.parse(sessionRaw) as DriverSession;
+          setSession(parsedSession);
+          setEntryStep('home');
+        } catch {
+          setEntryStep('login');
+        }
+      }, 850);
+    };
+
+    bootstrap();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [splashOpacity, splashScale]);
+
+  useEffect(() => {
+    if (entryStep !== 'otp' || otpSecondsLeft <= 0) {
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      setOtpSecondsLeft((current) => Math.max(0, current - 1));
+    }, 1000);
+
+    return () => clearTimeout(timeout);
+  }, [entryStep, otpSecondsLeft]);
+
+  const resolveIdentifier = (provider: AuthProvider): string => {
+    if (provider === 'google') {
+      return 'google-demo-driver';
+    }
+
+    return phoneNumber.replace(/\D/g, '');
+  };
+
+  const openHomeWithSession = async (provider: AuthProvider, identifier: string, name: string) => {
+    const nextSession: DriverSession = { provider, identifier, name };
+
+    try {
+      await AsyncStorage.setItem(DRIVER_SESSION_KEY, JSON.stringify(nextSession));
+    } catch {
+      // Allow access even if local persistence fails in current session.
+    }
+
+    setSession(nextSession);
+    setEntryStep('home');
+    setAuthFeedback(null);
+  };
+
+  const moveToDriverProfile = (provider: AuthProvider) => {
+    setAuthProvider(provider);
+    setProfileName('');
+    setEntryStep('profile');
+  };
+
+  const handleStartGoogleAuth = async () => {
+    const provider: AuthProvider = 'google';
+    const identifier = resolveIdentifier(provider);
+    const profileRaw = await AsyncStorage.getItem(`${DRIVER_PROFILE_PREFIX}${identifier}`);
+
+    if (profileRaw) {
+      try {
+        const profile = JSON.parse(profileRaw) as DriverRegistrationProfile;
+        setRegistration(profile);
+        if (profile.registrationComplete) {
+          await openHomeWithSession(provider, identifier, profile.name);
+          return;
+        }
+      } catch {
+        // Continue to profile creation.
+      }
+    }
+
+    moveToDriverProfile(provider);
+  };
+
+  const handleStartPhoneAuth = () => {
+    if (phoneNumber.replace(/\D/g, '').length < 10) {
+      setAuthFeedback('Ingresa un número válido para conductor.');
+      return;
+    }
+
+    setAuthProvider('phone');
+    setOtpCode('');
+    setOtpSecondsLeft(35);
+    setAuthFeedback('Código OTP enviado al conductor.');
+    setEntryStep('otp');
+  };
+
+  const handleVerifyOtp = async () => {
+    if (otpCode.length !== 6 || authProvider !== 'phone') {
+      setAuthFeedback('El código debe tener 6 dígitos.');
+      return;
+    }
+
+    const identifier = resolveIdentifier('phone');
+    const profileRaw = await AsyncStorage.getItem(`${DRIVER_PROFILE_PREFIX}${identifier}`);
+
+    if (profileRaw) {
+      try {
+        const profile = JSON.parse(profileRaw) as DriverRegistrationProfile;
+        setRegistration(profile);
+        if (profile.registrationComplete) {
+          await openHomeWithSession('phone', identifier, profile.name);
+          return;
+        }
+      } catch {
+        // Continue with profile + wizard.
+      }
+    }
+
+    moveToDriverProfile('phone');
+    setAuthFeedback('Código validado. Completa tu perfil de conductor.');
+  };
+
+  const handleSaveDriverProfile = () => {
+    const trimmedName = profileName.trim();
+    if (!trimmedName || !authProvider) {
+      setAuthFeedback('Escribe tu nombre para continuar.');
+      return;
+    }
+
+    setRegistration((current) => ({
+      ...current,
+      name: trimmedName,
+      phone: authProvider === 'phone' ? phoneNumber.replace(/\D/g, '') : current.phone,
+    }));
+    setWizardStep(0);
+    setEntryStep('wizard');
+  };
+
+  const handleResendOtp = () => {
+    if (otpSecondsLeft > 0) {
+      return;
+    }
+
+    setOtpSecondsLeft(35);
+    setAuthFeedback('Código reenviado.');
+  };
+
+  const handleFinishDriverRegistration = async () => {
+    if (!authProvider) {
+      return;
+    }
+
+    const identifier = resolveIdentifier(authProvider);
+    const completedProfile: DriverRegistrationProfile = {
+      ...registration,
+      registrationComplete: true,
+    };
+
+    if (!completedProfile.name || !completedProfile.motorcycleModel || !completedProfile.plate) {
+      setAuthFeedback('Completa los campos obligatorios del conductor.');
+      return;
+    }
+
+    await AsyncStorage.setItem(`${DRIVER_PROFILE_PREFIX}${identifier}`, JSON.stringify(completedProfile));
+    await openHomeWithSession(authProvider, identifier, completedProfile.name);
+  };
+
+  const handleQuickDriverDemoAccess = async () => {
+    const provider: AuthProvider = 'google';
+    const identifier = 'demo-driver-local';
+    const profile: DriverRegistrationProfile = {
+      name: 'Jhon Alex Motorizado',
+      phone: '3000000000',
+      motorcycleModel: 'AKT NKD 125',
+      plate: 'FUS 219',
+      documentId: '123456789',
+      licenseNumber: 'LIC-0001',
+      profilePhotoUrl: '',
+      registrationComplete: true,
+    };
+
+    try {
+      await AsyncStorage.setItem(`${DRIVER_PROFILE_PREFIX}${identifier}`, JSON.stringify(profile));
+    } catch {
+      // Continue with transient demo access.
+    }
+
+    await openHomeWithSession(provider, identifier, profile.name);
+  };
+
+  useEffect(() => {
+    if (entryStep !== 'home') {
+      return;
+    }
+
     const requestLocation = async () => {
       try {
         const { status } = await Location.requestForegroundPermissionsAsync();
@@ -98,9 +379,13 @@ export default function App() {
     };
 
     requestLocation();
-  }, []);
+  }, [entryStep]);
 
   useEffect(() => {
+    if (entryStep !== 'home') {
+      return;
+    }
+
     const socket = io(API_BASE_URL, {
       transports: ['websocket'],
     });
@@ -145,7 +430,7 @@ export default function App() {
       socket.disconnect();
       socketRef.current = null;
     };
-  }, []);
+  }, [entryStep]);
 
   const handleAcceptTrip = async () => {
     if (!incomingTrip || acceptingTrip) {
@@ -215,7 +500,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (!incomingTrip || incomingTrip.status !== 'EN_VIAJE') {
+    if (entryStep !== 'home' || !incomingTrip || incomingTrip.status !== 'EN_VIAJE') {
       return;
     }
 
@@ -258,7 +543,251 @@ export default function App() {
       isCancelled = true;
       clearInterval(interval);
     };
-  }, [incomingTrip?.id, incomingTrip?.status]);
+  }, [entryStep, incomingTrip?.id, incomingTrip?.status]);
+
+  if (entryStep === 'boot') {
+    return (
+      <SafeAreaProvider>
+        <SafeAreaView style={styles.screen}>
+          <Animated.View style={[styles.driverBootContainer, { opacity: splashOpacity, transform: [{ scale: splashScale }] }]}>
+            <Text style={styles.kicker}>MovilFusa Driver</Text>
+            <Text style={styles.title}>Conduce con confianza</Text>
+          </Animated.View>
+        </SafeAreaView>
+      </SafeAreaProvider>
+    );
+  }
+
+  if (entryStep === 'login') {
+    return (
+      <SafeAreaProvider>
+        <SafeAreaView style={styles.driverAuthScreen}>
+          <View style={styles.driverHeroCard}>
+            <View style={styles.driverHeroIconWrap}>
+              <MaterialCommunityIcons name="motorbike" size={34} color="#EA580C" />
+            </View>
+            <Text style={styles.driverAuthTitle}>Ingreso Conductor</Text>
+            <Text style={styles.driverAuthSubtitle}>Accede con Google o número de teléfono.</Text>
+          </View>
+
+          <TouchableOpacity style={styles.driverAuthPrimaryButton} onPress={handleStartGoogleAuth}>
+            <View style={styles.driverAuthButtonContentRow}>
+              <MaterialCommunityIcons name="google" size={20} color="#FFFFFF" />
+              <Text style={styles.driverAuthPrimaryButtonText}>Continuar con Google</Text>
+            </View>
+          </TouchableOpacity>
+
+          <Text style={styles.driverAuthHint}>o continúa con número</Text>
+
+          <View style={styles.driverPhoneInputRow}>
+            <View style={styles.driverPhonePrefixBadge}>
+              <Text style={styles.driverPhonePrefixText}>+57</Text>
+            </View>
+            <TextInput
+              value={phoneNumber}
+              onChangeText={setPhoneNumber}
+              placeholder="3001234567"
+              placeholderTextColor="#94A3B8"
+              keyboardType="phone-pad"
+              style={styles.driverPhoneInput}
+            />
+          </View>
+
+          <TouchableOpacity style={styles.driverAuthSecondaryButton} onPress={handleStartPhoneAuth}>
+            <View style={styles.driverAuthButtonContentRow}>
+              <MaterialCommunityIcons name="cellphone-message" size={19} color="#FFFFFF" />
+              <Text style={styles.driverAuthSecondaryButtonText}>Continuar con número de teléfono</Text>
+            </View>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.driverDemoButton} onPress={handleQuickDriverDemoAccess}>
+            <MaterialCommunityIcons name="flash" size={18} color="#0F172A" />
+            <Text style={styles.driverDemoButtonText}>Entrar rápido para pruebas</Text>
+          </TouchableOpacity>
+
+          {authFeedback ? <Text style={styles.driverAuthFeedback}>{authFeedback}</Text> : null}
+        </SafeAreaView>
+      </SafeAreaProvider>
+    );
+  }
+
+  if (entryStep === 'otp') {
+    return (
+      <SafeAreaProvider>
+        <SafeAreaView style={styles.driverAuthScreen}>
+          <Text style={styles.driverAuthTitle}>Código OTP</Text>
+          <Text style={styles.driverAuthSubtitle}>Ingresa el código de 6 dígitos para validar tu cuenta.</Text>
+
+          <TextInput
+            value={otpCode}
+            onChangeText={(value) => setOtpCode(value.replace(/\D/g, '').slice(0, 6))}
+            placeholder="123456"
+            placeholderTextColor="#94A3B8"
+            keyboardType="number-pad"
+            maxLength={6}
+            autoComplete="sms-otp"
+            textContentType="oneTimeCode"
+            style={styles.driverAuthOtpInput}
+          />
+
+          <TouchableOpacity style={styles.driverAuthPrimaryButton} onPress={handleVerifyOtp}>
+            <Text style={styles.driverAuthPrimaryButtonText}>Verificar código</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.driverDemoButton} onPress={() => setOtpCode('123456')}>
+            <MaterialCommunityIcons name="numeric-6-circle" size={18} color="#0F172A" />
+            <Text style={styles.driverDemoButtonText}>Usar OTP demo 123456</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.driverAuthGhostButton, otpSecondsLeft > 0 && styles.driverAuthGhostButtonDisabled]}
+            onPress={handleResendOtp}
+            disabled={otpSecondsLeft > 0}
+          >
+            <Text style={styles.driverAuthGhostButtonText}>
+              {otpSecondsLeft > 0 ? `Reenviar en ${otpSecondsLeft}s` : 'Reenviar código'}
+            </Text>
+          </TouchableOpacity>
+
+          {authFeedback ? <Text style={styles.driverAuthFeedback}>{authFeedback}</Text> : null}
+        </SafeAreaView>
+      </SafeAreaProvider>
+    );
+  }
+
+  if (entryStep === 'profile') {
+    return (
+      <SafeAreaProvider>
+        <SafeAreaView style={styles.driverAuthScreen}>
+          <Text style={styles.driverAuthTitle}>Perfil básico</Text>
+          <Text style={styles.driverAuthSubtitle}>Este paso se hace una sola vez.</Text>
+
+          <TextInput
+            value={profileName}
+            onChangeText={setProfileName}
+            placeholder="Nombre completo"
+            placeholderTextColor="#94A3B8"
+            style={styles.driverAuthInput}
+          />
+
+          <TouchableOpacity style={styles.driverAuthPrimaryButton} onPress={handleSaveDriverProfile}>
+            <Text style={styles.driverAuthPrimaryButtonText}>Continuar al registro</Text>
+          </TouchableOpacity>
+
+          {authFeedback ? <Text style={styles.driverAuthFeedback}>{authFeedback}</Text> : null}
+        </SafeAreaView>
+      </SafeAreaProvider>
+    );
+  }
+
+  if (entryStep === 'wizard') {
+    const totalSteps = 4;
+    const progress = ((wizardStep + 1) / totalSteps) * 100;
+
+    return (
+      <SafeAreaProvider>
+        <SafeAreaView style={styles.driverAuthScreen}>
+          <Text style={styles.driverAuthTitle}>Registro conductor</Text>
+          <Text style={styles.driverAuthSubtitle}>Paso {wizardStep + 1} de {totalSteps}</Text>
+
+          <View style={styles.wizardProgressTrack}>
+            <View style={[styles.wizardProgressFill, { width: `${progress}%` }]} />
+          </View>
+
+          {wizardStep === 0 ? (
+            <View style={styles.wizardStepBlock}>
+              <Text style={styles.wizardStepTitle}>Datos personales</Text>
+              <TextInput
+                value={registration.name}
+                onChangeText={(value) => setRegistration((current) => ({ ...current, name: value }))}
+                placeholder="Nombre completo"
+                placeholderTextColor="#94A3B8"
+                style={styles.driverAuthInput}
+              />
+            </View>
+          ) : null}
+
+          {wizardStep === 1 ? (
+            <View style={styles.wizardStepBlock}>
+              <Text style={styles.wizardStepTitle}>Moto y placa</Text>
+              <TextInput
+                value={registration.motorcycleModel}
+                onChangeText={(value) => setRegistration((current) => ({ ...current, motorcycleModel: value }))}
+                placeholder="Modelo de moto"
+                placeholderTextColor="#94A3B8"
+                style={styles.driverAuthInput}
+              />
+              <TextInput
+                value={registration.plate}
+                onChangeText={(value) => setRegistration((current) => ({ ...current, plate: value.toUpperCase() }))}
+                placeholder="Placa"
+                placeholderTextColor="#94A3B8"
+                style={styles.driverAuthInput}
+              />
+            </View>
+          ) : null}
+
+          {wizardStep === 2 ? (
+            <View style={styles.wizardStepBlock}>
+              <Text style={styles.wizardStepTitle}>Verificación mínima</Text>
+              <TextInput
+                value={registration.documentId}
+                onChangeText={(value) => setRegistration((current) => ({ ...current, documentId: value }))}
+                placeholder="Documento"
+                placeholderTextColor="#94A3B8"
+                style={styles.driverAuthInput}
+              />
+              <TextInput
+                value={registration.licenseNumber}
+                onChangeText={(value) => setRegistration((current) => ({ ...current, licenseNumber: value }))}
+                placeholder="Licencia"
+                placeholderTextColor="#94A3B8"
+                style={styles.driverAuthInput}
+              />
+            </View>
+          ) : null}
+
+          {wizardStep === 3 ? (
+            <View style={styles.wizardStepBlock}>
+              <Text style={styles.wizardStepTitle}>Foto opcional</Text>
+              <TextInput
+                value={registration.profilePhotoUrl ?? ''}
+                onChangeText={(value) => setRegistration((current) => ({ ...current, profilePhotoUrl: value }))}
+                placeholder="URL de foto (opcional)"
+                placeholderTextColor="#94A3B8"
+                style={styles.driverAuthInput}
+              />
+            </View>
+          ) : null}
+
+          <View style={styles.wizardActionsRow}>
+            <TouchableOpacity
+              style={[styles.driverAuthGhostButton, wizardStep === 0 && styles.driverAuthGhostButtonDisabled]}
+              disabled={wizardStep === 0}
+              onPress={() => setWizardStep((current) => Math.max(0, current - 1))}
+            >
+              <Text style={styles.driverAuthGhostButtonText}>Atrás</Text>
+            </TouchableOpacity>
+
+            {wizardStep < 3 ? (
+              <TouchableOpacity
+                style={styles.driverAuthPrimaryButton}
+                onPress={() => setWizardStep((current) => Math.min(3, current + 1))}
+              >
+                <Text style={styles.driverAuthPrimaryButtonText}>Siguiente</Text>
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity style={styles.driverAuthPrimaryButton} onPress={handleFinishDriverRegistration}>
+                <Text style={styles.driverAuthPrimaryButtonText}>Finalizar registro</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {authFeedback ? <Text style={styles.driverAuthFeedback}>{authFeedback}</Text> : null}
+        </SafeAreaView>
+      </SafeAreaProvider>
+    );
+  }
 
   const serviceLabel = incomingTrip?.serviceType === 'encomienda' ? 'Encomienda' : 'Pasajero';
   const serviceIcon = incomingTrip?.serviceType === 'encomienda' ? 'package-variant-closed' : 'motorbike';
@@ -450,6 +979,211 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
+  driverBootContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  driverAuthScreen: {
+    flex: 1,
+    backgroundColor: '#F8FAFC',
+    paddingHorizontal: 24,
+    paddingTop: 80,
+  },
+  driverHeroCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    paddingHorizontal: 18,
+    paddingVertical: 20,
+    borderWidth: 1,
+    borderColor: '#FED7AA',
+    shadowColor: '#0F172A',
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 4,
+    marginBottom: 12,
+  },
+  driverHeroIconWrap: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: '#FFEDD5',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 10,
+  },
+  driverAuthTitle: {
+    fontSize: 30,
+    fontWeight: '900',
+    color: '#0F172A',
+  },
+  driverAuthSubtitle: {
+    marginTop: 8,
+    fontSize: 14,
+    color: '#475569',
+    fontWeight: '600',
+  },
+  driverAuthHint: {
+    marginTop: 20,
+    marginBottom: 8,
+    textAlign: 'center',
+    color: '#64748B',
+    fontWeight: '700',
+  },
+  driverAuthInput: {
+    marginTop: 10,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    color: '#0F172A',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  driverPhoneInputRow: {
+    marginTop: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  driverPhonePrefixBadge: {
+    backgroundColor: '#E2E8F0',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+  },
+  driverPhonePrefixText: {
+    color: '#0F172A',
+    fontWeight: '800',
+  },
+  driverPhoneInput: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    color: '#0F172A',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  driverAuthOtpInput: {
+    marginTop: 14,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    color: '#0F172A',
+    fontSize: 28,
+    fontWeight: '800',
+    textAlign: 'center',
+    letterSpacing: 8,
+  },
+  driverAuthPrimaryButton: {
+    marginTop: 16,
+    backgroundColor: '#EA580C',
+    borderRadius: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    alignItems: 'center',
+  },
+  driverAuthPrimaryButtonText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  driverAuthButtonContentRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  driverAuthSecondaryButton: {
+    marginTop: 12,
+    backgroundColor: '#0F172A',
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  driverAuthSecondaryButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  driverDemoButton: {
+    marginTop: 12,
+    borderRadius: 12,
+    paddingVertical: 11,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    backgroundColor: '#F1F5F9',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 8,
+  },
+  driverDemoButtonText: {
+    color: '#0F172A',
+    fontWeight: '800',
+    fontSize: 13,
+  },
+  driverAuthGhostButton: {
+    marginTop: 10,
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderWidth: 1,
+    borderColor: '#94A3B8',
+    alignItems: 'center',
+  },
+  driverAuthGhostButtonDisabled: {
+    opacity: 0.5,
+  },
+  driverAuthGhostButtonText: {
+    color: '#334155',
+    fontWeight: '700',
+  },
+  driverAuthFeedback: {
+    marginTop: 12,
+    textAlign: 'center',
+    color: '#0F766E',
+    fontWeight: '700',
+  },
+  wizardProgressTrack: {
+    marginTop: 14,
+    height: 8,
+    borderRadius: 999,
+    backgroundColor: '#E2E8F0',
+    overflow: 'hidden',
+  },
+  wizardProgressFill: {
+    height: '100%',
+    backgroundColor: '#EA580C',
+  },
+  wizardStepBlock: {
+    marginTop: 16,
+  },
+  wizardStepTitle: {
+    color: '#1E293B',
+    fontSize: 14,
+    fontWeight: '800',
+    marginBottom: 6,
+  },
+  wizardActionsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 12,
+  },
   screen: {
     flex: 1,
     backgroundColor: '#0B1120',
