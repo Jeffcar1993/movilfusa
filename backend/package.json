@@ -20,6 +20,8 @@
     "typescript": "^6.0.3"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.106.2",
+    "dotenv": "^16.4.7",
     "express": "^5.2.1",
     "socket.io": "^4.8.3"
   }
