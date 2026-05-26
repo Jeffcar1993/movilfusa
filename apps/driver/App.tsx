@@ -47,6 +47,8 @@ interface TripRecord {
   serviceType: ServiceType;
   packageNotes?: string;
   status: TripStatus;
+  createdAt?: string;
+  acceptedAt?: string;
   driver?: DriverProfile;
   startedAt?: string;
   finishedAt?: string;
@@ -102,6 +104,24 @@ const DRIVER_PROFILE_PREFIX = 'movilfusa:driver:profile:';
 const getDriverProfileKey = (identifier: string) => `${DRIVER_PROFILE_PREFIX}${identifier}`;
 
 const formatCop = (value: number) => `$${value.toLocaleString('es-CO')}`;
+const formatDateTime = (value?: string) => {
+  if (!value) {
+    return 'Sin fecha';
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return 'Sin fecha';
+  }
+
+  return parsed.toLocaleString('es-CO', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
 
 export default function App() {
   const [entryStep, setEntryStep] = useState<DriverEntryStep>('boot');
@@ -559,6 +579,17 @@ export default function App() {
     try {
       const response = await fetch(`${API_BASE_URL}/api/driver/trips/${incomingTrip.id}/accept`, {
         method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          driver: {
+            id: session?.identifier,
+            name: registration.name || session?.name,
+            vehicle: registration.motorcycleModel,
+            plate: registration.plate,
+          },
+        }),
       });
       const data = (await response.json()) as DriverTripResponse;
 
@@ -1039,6 +1070,9 @@ export default function App() {
                     driverTripHistory.map((trip) => (
                       <View key={trip.id} style={styles.profileTripItem}>
                         <Text style={styles.profileTripPrimary}>Viaje {trip.id.slice(-6)}</Text>
+                        <Text style={styles.profileTripMeta}>Fecha: {formatDateTime(trip.finishedAt ?? trip.createdAt)}</Text>
+                        <Text style={styles.profileTripMeta}>Origen: {trip.origin?.name ?? 'Sin dato'}</Text>
+                        <Text style={styles.profileTripMeta}>Destino: {trip.destination?.name ?? 'Sin dato'}</Text>
                         <Text style={styles.profileTripMeta}>Estado: {trip.status}</Text>
                         <Text style={styles.profileTripMeta}>Ganancia: {formatCop(trip.fare)}</Text>
                       </View>

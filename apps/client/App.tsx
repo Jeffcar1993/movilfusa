@@ -46,7 +46,18 @@ interface TripRecord {
   status: TripStatus;
   serviceType: ServiceType;
   packageNotes?: string;
+  createdAt?: string;
   driver?: DriverProfile;
+  origin?: {
+    latitude: number;
+    longitude: number;
+    name: string;
+  };
+  destination?: {
+    latitude: number;
+    longitude: number;
+    name: string;
+  };
   finishedAt?: string;
   currentDriverLocation?: {
     latitude: number;
@@ -111,6 +122,24 @@ const fallbackApiBaseUrl = Platform.select({
 
 const API_BASE_URL = (process.env.EXPO_PUBLIC_API_URL ?? fallbackApiBaseUrl).replace(/\/$/, '');
 const formatCop = (fare: number) => `$${fare.toLocaleString('es-CO')} COP`;
+const formatDateTime = (value?: string) => {
+  if (!value) {
+    return 'Sin fecha';
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return 'Sin fecha';
+  }
+
+  return parsed.toLocaleString('es-CO', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
 const CLIENT_SESSION_KEY = 'movilfusa:client:session';
 const CLIENT_PROFILE_PREFIX = 'movilfusa:client:profile:';
 const getClientProfileKey = (identifier: string) => `${CLIENT_PROFILE_PREFIX}${identifier}`;
@@ -1182,6 +1211,9 @@ export default function App() {
                   clientTripHistory.map((trip) => (
                     <View key={trip.id} style={styles.profileTripItem}>
                       <Text style={styles.profileTripPrimary}>Viaje {trip.id.slice(-6)}</Text>
+                      <Text style={styles.profileTripMeta}>Fecha: {formatDateTime(trip.finishedAt ?? trip.createdAt)}</Text>
+                      <Text style={styles.profileTripMeta}>Origen: {trip.origin?.name ?? 'Sin dato'}</Text>
+                      <Text style={styles.profileTripMeta}>Destino: {trip.destination?.name ?? 'Sin dato'}</Text>
                       <Text style={styles.profileTripMeta}>Estado: {trip.status}</Text>
                       <Text style={styles.profileTripMeta}>Valor: {formatCop(trip.fare)}</Text>
                     </View>

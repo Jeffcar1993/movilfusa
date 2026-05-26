@@ -66,6 +66,15 @@ interface TripRatingRequestBody {
   message?: string;
 }
 
+interface AcceptTripRequestBody {
+  driver?: {
+    id?: string;
+    name?: string;
+    vehicle?: string;
+    plate?: string;
+  };
+}
+
 interface TripRecord {
   id: string;
   origin: Required<TripPoint>;
@@ -101,11 +110,20 @@ const getTripIdFromParams = (tripIdParam: string | string[] | undefined): string
   typeof tripIdParam === 'string' ? tripIdParam : null;
 const getTripRoom = (tripId: string) => `trip:${tripId}`;
 
-const buildDriverProfile = (): DriverProfile => ({
-  id: 'driver-001',
-  name: 'Jhon Alex Motorizado',
-  vehicle: 'AKT NKD 125',
-  plate: 'FUS 219',
+const buildDriverProfile = (payload?: AcceptTripRequestBody['driver']): DriverProfile => ({
+  id: typeof payload?.id === 'string' && payload.id.trim().length > 0 ? payload.id.trim() : 'driver-001',
+  name:
+    typeof payload?.name === 'string' && payload.name.trim().length > 0
+      ? payload.name.trim()
+      : 'Jhon Alex Motorizado',
+  vehicle:
+    typeof payload?.vehicle === 'string' && payload.vehicle.trim().length > 0
+      ? payload.vehicle.trim()
+      : 'AKT NKD 125',
+  plate:
+    typeof payload?.plate === 'string' && payload.plate.trim().length > 0
+      ? payload.plate.trim()
+      : 'FUS 219',
 });
 
 const getNextPendingTrip = (): TripRecord | null =>
@@ -356,11 +374,13 @@ app.post('/api/driver/trips/:tripId/accept', (req: Request, res: Response) => {
     return res.status(409).json({ message: 'Este viaje ya no esta disponible.', trip });
   }
 
+  const { driver } = req.body as AcceptTripRequestBody;
+
   const acceptedTrip: TripRecord = {
     ...trip,
     status: 'CONDUCTOR_EN_CAMINO',
     acceptedAt: new Date().toISOString(),
-    driver: buildDriverProfile(),
+    driver: buildDriverProfile(driver),
   };
 
   trips.set(acceptedTrip.id, acceptedTrip);
