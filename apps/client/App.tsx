@@ -1395,10 +1395,19 @@ export default function App() {
             )
           ) : (
             <>
-              <View style={styles.serviceTypeBadge}>
-                <Text style={styles.serviceTypeBadgeText}>
-                  {destination.serviceType === 'encomienda' ? 'Servicio: Encomienda' : 'Servicio: Viaje en moto'}
-                </Text>
+              <View style={styles.serviceTypeRow}>
+                <TouchableOpacity
+                  style={styles.serviceTypeToggleButton}
+                  onPress={() => setSearchMode('destination')}
+                >
+                  <MaterialCommunityIcons name="arrow-left" size={16} color="#1E3A8A" />
+                </TouchableOpacity>
+
+                <View style={styles.serviceTypeBadge}>
+                  <Text style={styles.serviceTypeBadgeText}>
+                    {destination.serviceType === 'encomienda' ? 'Servicio: Encomienda' : 'Servicio: Viaje en moto'}
+                  </Text>
+                </View>
               </View>
 
               {destination.serviceType === 'encomienda' && destination.packageNotes ? (
@@ -1772,7 +1781,23 @@ const styles = StyleSheet.create({
   profileEmptyText: { color: '#64748B', textAlign: 'center', fontWeight: '600', marginTop: 10 },
 
   confirmTripContainer: { position: 'absolute', left: 16, right: 16, bottom: 30, backgroundColor: '#FFFFFF', borderRadius: 24, padding: 20, elevation: 12, shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.15, shadowRadius: 10, zIndex: 30 },
-  serviceTypeBadge: { alignSelf: 'flex-start', marginBottom: 10, backgroundColor: '#FEF3C7', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6 },
+  serviceTypeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+  },
+  serviceTypeToggleButton: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    backgroundColor: '#EFF6FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  serviceTypeBadge: { alignSelf: 'flex-start', backgroundColor: '#FEF3C7', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6 },
   serviceTypeBadgeText: { fontSize: 12, fontWeight: '800', color: '#92400E' },
   packageNotesText: { marginBottom: 10, fontSize: 12, color: '#475569', fontWeight: '600' },
   tripHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 },
