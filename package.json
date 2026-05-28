@@ -11,7 +11,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "backend": "npm run dev --workspace=backend",
-    "client": "npm run start --workspace=client --",
+    "client": "npm run start --workspace=client -- --lan -c",
     "client:tunnel": "npm run start --workspace=client -- --tunnel -c",
     "driver": "npm run start --workspace=driver --",
     "driver:tunnel": "npm run start --workspace=driver -- --tunnel -c"

@@ -78,6 +78,12 @@ interface AcceptTripRequestBody {
   };
 }
 
+interface RegisterClientAuthRequestBody {
+  email?: string;
+  password?: string;
+  name?: string;
+}
+
 interface TripRecord {
   id: string;
   origin: Required<TripPoint>;
@@ -523,6 +529,52 @@ app.get('/api/health', (req: Request, res: Response) => {
   res.json({ status: 'ok', message: 'Servidor de MovilFusa corriendo' });
 });
 
+app.post('/api/client/auth/register', async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as RegisterClientAuthRequestBody;
+  const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+  const password = typeof body.password === 'string' ? body.password : '';
+  const name =
+    typeof body.name === 'string' && body.name.trim().length > 0
+      ? body.name.trim()
+      : (email.split('@')[0] ?? 'Cliente');
+
+  if (!email || !email.includes('@')) {
+    return res.status(400).json({ message: 'Correo inválido.' });
+  }
+
+  if (password.length < 6) {
+    return res.status(400).json({ message: 'La contraseña debe tener al menos 6 caracteres.' });
+  }
+
+  try {
+    const { data, error } = await supabaseAdmin.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: {
+        name,
+      },
+    });
+
+    if (error || !data.user) {
+      throw error ?? new Error('No se pudo crear el usuario.');
+    }
+
+    await ensureProfile(data.user.id, 'client', name);
+
+    return res.status(201).json({
+      user: {
+        id: data.user.id,
+        email: data.user.email,
+      },
+    });
+  } catch (error) {
+    const message = extractErrorMessage(error);
+    const statusCode = /already|exists|registered|duplicate/i.test(message) ? 409 : 500;
+    return res.status(statusCode).json({ message });
+  }
+});
+
 app.post('/api/trips', async (req: Request, res: Response) => {
   const { origin, destination, fare, serviceType, packageNotes, client } = req.body as CreateTripRequestBody;
   const resolvedServiceType: ServiceType = serviceType === 'encomienda' ? 'encomienda' : 'pasajero';
@@ -635,28 +687,39 @@ app.delete('/api/client/account/:clientId', async (req: Request, res: Response) 
   const clientId = normalizeExternalIdToUuid(externalClientId);
 
   try {
-    await supabaseAdmin.from('profiles').update({ name: 'Cuenta eliminada', deleted_at: new Date().toISOString() }).eq('id', clientId);
+    const { data: clientTrips, error: listTripsError } = await supabaseAdmin
+      .from('trips')
+      .select('id')
+      .eq('client_id', clientId);
 
-    const { data: clientTrips } = await supabaseAdmin.from('trips').select('id, status').eq('client_id', clientId);
-    const pendingTripIds = (clientTrips ?? [] as Array<{ id: string; status: TripStatus }>)
-      .filter((trip: { id: string; status: TripStatus }) => trip.status === 'PENDING')
-      .map((trip: { id: string; status: TripStatus }) => trip.id);
+    if (listTripsError) {
+      throw listTripsError;
+    }
 
-    for (const tripId of pendingTripIds) {
-      const updatedTrip = await updateTripStatus(tripId, {
-        status: 'CANCELADO',
-        cancelled_at: new Date().toISOString(),
-      });
+    const tripIds = ((clientTrips ?? []) as Array<{ id: string }>).map((trip) => trip.id);
 
-      if (updatedTrip) {
-        void emitTripUpdate(updatedTrip);
+    if (tripIds.length > 0) {
+      const { error: deleteTripsError } = await supabaseAdmin.from('trips').delete().eq('client_id', clientId);
+
+      if (deleteTripsError) {
+        throw deleteTripsError;
+      }
+
+      for (const tripId of tripIds) {
+        tripRows.delete(tripId);
       }
     }
 
+    const { error: deleteAuthUserError } = await supabaseAdmin.auth.admin.deleteUser(clientId);
+
+    if (deleteAuthUserError && !/user.*not.*found/i.test(extractErrorMessage(deleteAuthUserError))) {
+      throw deleteAuthUserError;
+    }
+
     void emitDriverQueueUpdate();
-    return res.json({ message: 'Cuenta de cliente eliminada de forma permanente.' });
-  } catch {
-    return res.status(500).json({ message: 'No fue posible eliminar la cuenta del cliente.' });
+    return res.json({ message: 'Cuenta eliminada completamente de la base de datos y autenticación.' });
+  } catch (error) {
+    return res.status(500).json({ message: 'No fue posible eliminar la cuenta del cliente.', details: extractErrorMessage(error) });
   }
 });
 

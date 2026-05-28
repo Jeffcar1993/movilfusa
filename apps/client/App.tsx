@@ -19,10 +19,14 @@ import {
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE, type LatLng } from 'react-native-maps';
 import * as Location from 'expo-location';
 import * as ImagePicker from 'expo-image-picker';
+import * as WebBrowser from 'expo-web-browser';
+import * as Linking from 'expo-linking';
 import { io, type Socket } from 'socket.io-client';
+import type { User } from '@supabase/supabase-js';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import AddressSearch from './src/components/AddressSearch';
+import { supabase } from './src/lib/supabase';
 
 interface RouteInfo {
   distanceKm: number;
@@ -86,18 +90,20 @@ interface DriverLocationEvent {
   };
 }
 
-type AuthProvider = 'google' | 'phone';
-type ClientEntryStep = 'boot' | 'login' | 'otp' | 'profile' | 'home';
+type AuthProvider = 'google' | 'email';
+type ClientEntryStep = 'boot' | 'login' | 'profile' | 'home';
 
 interface ClientSession {
   provider: AuthProvider;
   identifier: string;
   name: string;
+  email?: string;
 }
 
 interface ClientRegistrationProfile {
   name: string;
   phone?: string;
+  email?: string;
   provider: AuthProvider;
   identifier: string;
   profilePhotoUrl?: string;
@@ -143,6 +149,56 @@ const formatDateTime = (value?: string) => {
 const CLIENT_SESSION_KEY = 'movilfusa:client:session';
 const CLIENT_PROFILE_PREFIX = 'movilfusa:client:profile:';
 const getClientProfileKey = (identifier: string) => `${CLIENT_PROFILE_PREFIX}${identifier}`;
+const OAUTH_REDIRECT_URI = Linking.createURL('/');
+
+WebBrowser.maybeCompleteAuthSession();
+
+const extractAuthParams = (url: string): Record<string, string> => {
+  const [base, hash = ''] = url.split('#');
+  const query = base.includes('?') ? (base.split('?')[1] ?? '') : '';
+  const merged = [query, hash].filter(Boolean).join('&');
+
+  if (!merged) {
+    return {};
+  }
+
+  const params = new URLSearchParams(merged);
+  const result: Record<string, string> = {};
+
+  for (const [key, value] of params.entries()) {
+    result[key] = value;
+  }
+
+  return result;
+};
+
+const resolveGoogleDisplayName = (user: User): string => {
+  const meta = (user.user_metadata ?? {}) as Record<string, unknown>;
+  const metadataName =
+    typeof meta.full_name === 'string'
+      ? meta.full_name
+      : typeof meta.name === 'string'
+        ? meta.name
+        : typeof meta.user_name === 'string'
+          ? meta.user_name
+          : '';
+
+  const fromEmail = typeof user.email === 'string' ? user.email.split('@')[0] ?? '' : '';
+  const resolved = metadataName.trim() || fromEmail.trim() || 'Cliente';
+  return resolved;
+};
+
+const resolveAuthProviderFromUser = (user: User): AuthProvider => {
+  const appMeta = (user.app_metadata ?? {}) as Record<string, unknown>;
+  const provider = typeof appMeta.provider === 'string' ? appMeta.provider : '';
+  const providers = Array.isArray(appMeta.providers) ? appMeta.providers : [];
+
+  if (provider === 'email' || providers.includes('email')) {
+    return 'email';
+  }
+
+  return 'google';
+};
 
 export default function App() {
   const [location, setLocation] = useState<Location.LocationObject | null>(null);
@@ -150,11 +206,17 @@ export default function App() {
   const [entryStep, setEntryStep] = useState<ClientEntryStep>('boot');
   const [session, setSession] = useState<ClientSession | null>(null);
   const [authProvider, setAuthProvider] = useState<AuthProvider | null>(null);
-  const [phoneNumber, setPhoneNumber] = useState('');
-  const [otpCode, setOtpCode] = useState('');
-  const [otpSecondsLeft, setOtpSecondsLeft] = useState(0);
   const [profileName, setProfileName] = useState('');
   const [authFeedback, setAuthFeedback] = useState<string | null>(null);
+  const [googleAuthLoading, setGoogleAuthLoading] = useState(false);
+  const [emailAuthLoading, setEmailAuthLoading] = useState(false);
+  const [emailAuthMode, setEmailAuthMode] = useState<'register' | 'login'>('register');
+  const [savingProfileChanges, setSavingProfileChanges] = useState(false);
+  const [emailValue, setEmailValue] = useState('');
+  const [passwordValue, setPasswordValue] = useState('');
+  const [profileEmail, setProfileEmail] = useState('');
+  const [profilePhone, setProfilePhone] = useState('');
+  const googleAuthLoadingRef = useRef(false);
   const splashOpacity = useRef(new Animated.Value(0)).current;
   const splashScale = useRef(new Animated.Value(0.95)).current;
   
@@ -218,8 +280,89 @@ export default function App() {
     }
   };
 
+  useEffect(() => {
+    if (entryStep === 'profile' || (showProfileScreen && profileSection === 'details')) {
+      setProfileName(clientProfile?.name ?? session?.name ?? '');
+      setProfileEmail(clientProfile?.email ?? session?.email ?? '');
+      setProfilePhone(clientProfile?.phone ?? '');
+    }
+  }, [clientProfile, entryStep, profileSection, session, showProfileScreen]);
+
+  const syncClientSessionFromSupabaseUser = async (user: User, providerOverride?: AuthProvider) => {
+    setGoogleAuthLoading(false);
+    googleAuthLoadingRef.current = false;
+    setEmailAuthLoading(false);
+    const provider = providerOverride ?? resolveAuthProviderFromUser(user);
+    const resolvedName = resolveGoogleDisplayName(user);
+    const metadata = (user.user_metadata ?? {}) as Record<string, unknown>;
+    const avatarUrl = typeof metadata.avatar_url === 'string' ? metadata.avatar_url : '';
+
+    const { error: upsertError } = await supabase.from('profiles').upsert(
+      {
+        id: user.id,
+        role: 'client',
+        name: resolvedName,
+        avatar_url: avatarUrl || null,
+      },
+      { onConflict: 'id' },
+    );
+
+    if (upsertError) {
+      throw upsertError;
+    }
+
+    const { data: profileRow, error: profileError } = await supabase
+      .from('profiles')
+      .select('id, name, phone, avatar_url')
+      .eq('id', user.id)
+      .maybeSingle();
+
+    if (profileError) {
+      throw profileError;
+    }
+
+    const profileNameFromDb = typeof profileRow?.name === 'string' && profileRow.name.trim().length > 0
+      ? profileRow.name.trim()
+      : resolvedName;
+
+    const nextSession: ClientSession = {
+      provider,
+      identifier: user.id,
+      name: profileNameFromDb,
+      email: typeof user.email === 'string' ? user.email : undefined,
+    };
+
+    try {
+      await AsyncStorage.setItem(CLIENT_SESSION_KEY, JSON.stringify(nextSession));
+    } catch {
+      // Keep in-memory session even if local cache fails.
+    }
+
+    await saveClientProfile({
+      name: profileNameFromDb,
+      provider,
+      identifier: user.id,
+      email: typeof user.email === 'string' ? user.email : undefined,
+      phone: typeof profileRow?.phone === 'string' ? profileRow.phone : undefined,
+      profilePhotoUrl:
+        typeof profileRow?.avatar_url === 'string' && profileRow.avatar_url.trim().length > 0
+          ? profileRow.avatar_url
+          : avatarUrl,
+      registrationComplete: true,
+    });
+
+    setSession(nextSession);
+    setAuthProvider(provider);
+    setProfileName(profileNameFromDb);
+    setProfileEmail(typeof user.email === 'string' ? user.email : '');
+    setProfilePhone(typeof profileRow?.phone === 'string' ? profileRow.phone : '');
+    setAuthFeedback(null);
+    setEntryStep('home');
+  };
+
   const handleLogout = async () => {
     try {
+      await supabase.auth.signOut();
       await AsyncStorage.removeItem(CLIENT_SESSION_KEY);
     } catch {
       // Keep UX responsive even if storage fails.
@@ -247,14 +390,26 @@ export default function App() {
           style: 'destructive',
           onPress: async () => {
             try {
-              await fetch(`${API_BASE_URL}/api/client/account/${session.identifier}`, {
+              const response = await fetch(`${API_BASE_URL}/api/client/account/${session.identifier}`, {
                 method: 'DELETE',
               });
+
+              const payload = (await response.json().catch(() => null)) as { message?: string; details?: string } | null;
+
+              if (!response.ok) {
+                Alert.alert(
+                  'No se pudo eliminar la cuenta',
+                  payload?.details ?? payload?.message ?? 'Intenta de nuevo en unos minutos.',
+                );
+                return;
+              }
             } catch {
-              // Account cleanup continues locally even if backend is unavailable.
+              Alert.alert('Sin conexión', 'No se pudo eliminar la cuenta en el servidor.');
+              return;
             }
 
             try {
+              await supabase.auth.signOut();
               await AsyncStorage.removeItem(CLIENT_SESSION_KEY);
               await AsyncStorage.removeItem(getClientProfileKey(session.identifier));
             } catch {
@@ -273,7 +428,7 @@ export default function App() {
   };
 
   const handlePickProfilePhoto = async () => {
-    if (!clientProfile) {
+    if (!session?.identifier) {
       return;
     }
 
@@ -295,11 +450,125 @@ export default function App() {
     }
 
     const updatedProfile: ClientRegistrationProfile = {
-      ...clientProfile,
+      name: clientProfile?.name ?? session?.name ?? (profileName.trim() || 'Cliente'),
+      provider: clientProfile?.provider ?? session?.provider ?? 'email',
+      identifier: session.identifier,
+      email: clientProfile?.email ?? session?.email,
+      phone: clientProfile?.phone,
       profilePhotoUrl: result.assets[0].uri,
+      registrationComplete: true,
     };
 
     await saveClientProfile(updatedProfile);
+    setAuthFeedback('Foto seleccionada. Guarda cambios para persistirla en tu perfil.');
+  };
+
+  const persistEditableProfile = async (options?: { navigateHome?: boolean }) => {
+    const trimmedName = profileName.trim();
+    const normalizedEmail = profileEmail.trim().toLowerCase();
+    const sanitizedPhone = profilePhone.replace(/[^\d+]/g, '').trim();
+    const identifier = session?.identifier ?? '';
+
+    if (!identifier) {
+      setAuthFeedback('No fue posible resolver tu cuenta. Inicia sesión de nuevo.');
+      return;
+    }
+
+    if (!trimmedName) {
+      setAuthFeedback('Escribe tu nombre completo para continuar.');
+      return;
+    }
+
+    if (!normalizedEmail || !normalizedEmail.includes('@')) {
+      setAuthFeedback('Ingresa un correo válido.');
+      return;
+    }
+
+    setSavingProfileChanges(true);
+
+    try {
+      const { data: currentUserData } = await supabase.auth.getUser();
+      const currentEmail = currentUserData.user?.email?.trim().toLowerCase() ?? session?.email?.trim().toLowerCase() ?? '';
+      const avatarUrl = clientProfile?.profilePhotoUrl?.trim() || null;
+
+      if (normalizedEmail !== currentEmail) {
+        const { error: updateEmailError } = await supabase.auth.updateUser({
+          email: normalizedEmail,
+          data: {
+            name: trimmedName,
+            avatar_url: avatarUrl,
+          },
+        });
+
+        if (updateEmailError) {
+          throw updateEmailError;
+        }
+      } else {
+        const { error: updateMetadataError } = await supabase.auth.updateUser({
+          data: {
+            name: trimmedName,
+            avatar_url: avatarUrl,
+          },
+        });
+
+        if (updateMetadataError) {
+          throw updateMetadataError;
+        }
+      }
+
+      const { error: profileUpsertError } = await supabase.from('profiles').upsert(
+        {
+          id: identifier,
+          role: 'client',
+          name: trimmedName,
+          phone: sanitizedPhone || null,
+          avatar_url: avatarUrl,
+        },
+        { onConflict: 'id' },
+      );
+
+      if (profileUpsertError) {
+        throw profileUpsertError;
+      }
+
+      const nextSession: ClientSession = {
+        provider: authProvider ?? session?.provider ?? 'email',
+        identifier,
+        name: trimmedName,
+        email: normalizedEmail,
+      };
+
+      try {
+        await AsyncStorage.setItem(CLIENT_SESSION_KEY, JSON.stringify(nextSession));
+      } catch {
+        // Keep in-memory session even if local cache fails.
+      }
+
+      await saveClientProfile({
+        name: trimmedName,
+        provider: authProvider ?? session?.provider ?? 'email',
+        identifier,
+        email: normalizedEmail,
+        phone: sanitizedPhone || undefined,
+        profilePhotoUrl: avatarUrl ?? undefined,
+        registrationComplete: true,
+      });
+
+      setSession(nextSession);
+      setAuthFeedback(
+        normalizedEmail !== currentEmail
+          ? 'Perfil actualizado. Si Supabase exige confirmación de correo, revisa tu email.'
+          : 'Perfil actualizado correctamente.'
+      );
+
+      if (options?.navigateHome) {
+        setEntryStep('home');
+      }
+    } catch {
+      setAuthFeedback('No fue posible guardar tu perfil. Revisa los datos e inténtalo de nuevo.');
+    } finally {
+      setSavingProfileChanges(false);
+    }
   };
 
   const visibleRouteCoordinates = routeCoordinates.length > 1 ? routeCoordinates : fallbackRouteCoordinates;
@@ -343,7 +612,7 @@ export default function App() {
     let isMounted = true;
 
     const bootstrapSession = async () => {
-      let savedSessionRaw: string | null = null;
+      let initialUser: User | null = null;
 
       Animated.parallel([
         Animated.timing(splashOpacity, {
@@ -361,9 +630,12 @@ export default function App() {
       ]).start();
 
       try {
-        savedSessionRaw = await AsyncStorage.getItem(CLIENT_SESSION_KEY);
+        const { data, error } = await supabase.auth.getSession();
+        if (!error) {
+          initialUser = data.session?.user ?? null;
+        }
       } catch {
-        savedSessionRaw = null;
+        initialUser = null;
       }
 
       setTimeout(() => {
@@ -371,24 +643,15 @@ export default function App() {
           return;
         }
 
-        if (!savedSessionRaw) {
+        if (!initialUser) {
           setEntryStep('login');
           return;
         }
 
-        try {
-          const parsedSession = JSON.parse(savedSessionRaw) as ClientSession;
-          if (parsedSession?.identifier && parsedSession?.name) {
-            setSession(parsedSession);
-            void loadClientProfile(parsedSession.identifier);
-            setEntryStep('home');
-            return;
-          }
-        } catch {
-          // If parsing fails, continue with fresh login.
-        }
-
-        setEntryStep('login');
+        void syncClientSessionFromSupabaseUser(initialUser).catch(() => {
+          setAuthFeedback('No fue posible restaurar tu sesión de Google.');
+          setEntryStep('login');
+        });
       }, 850);
     };
 
@@ -398,18 +661,6 @@ export default function App() {
       isMounted = false;
     };
   }, [splashOpacity, splashScale]);
-
-  useEffect(() => {
-    if (entryStep !== 'otp' || otpSecondsLeft <= 0) {
-      return;
-    }
-
-    const timeout = setTimeout(() => {
-      setOtpSecondsLeft((current) => Math.max(0, current - 1));
-    }, 1000);
-
-    return () => clearTimeout(timeout);
-  }, [entryStep, otpSecondsLeft]);
 
   useEffect(() => {
     if (entryStep !== 'home' || location) {
@@ -452,14 +703,6 @@ export default function App() {
     };
   }, [entryStep, location]);
 
-  const resolveIdentifier = (provider: AuthProvider): string => {
-    if (provider === 'google') {
-      return 'google-demo-user';
-    }
-
-    return phoneNumber.replace(/\D/g, '');
-  };
-
   const persistSessionAndOpenHome = async (provider: AuthProvider, identifier: string, name: string) => {
     const nextSession: ClientSession = { provider, identifier, name };
 
@@ -475,103 +718,220 @@ export default function App() {
     setEntryStep('home');
   };
 
+  // Handle incoming deep-link URL (from OAuth redirect or Linking.openURL)
+  const handleIncomingUrl = async (url: string) => {
+    if (!url) return;
+
+    const params = extractAuthParams(url);
+
+    if (typeof params.code === 'string' && params.code.length > 0) {
+      try {
+        const { error } = await supabase.auth.exchangeCodeForSession(params.code);
+        if (error) throw error;
+      } catch {
+        setAuthFeedback('No fue posible completar el inicio con Google.');
+        setGoogleAuthLoading(false);
+        googleAuthLoadingRef.current = false;
+      }
+      return;
+    }
+
+    if (
+      typeof params.access_token === 'string' &&
+      typeof params.refresh_token === 'string' &&
+      params.access_token.length > 0 &&
+      params.refresh_token.length > 0
+    ) {
+      try {
+        const { error } = await supabase.auth.setSession({
+          access_token: params.access_token,
+          refresh_token: params.refresh_token,
+        });
+        if (error) throw error;
+      } catch {
+        setAuthFeedback('No fue posible completar el inicio con Google.');
+        setGoogleAuthLoading(false);
+        googleAuthLoadingRef.current = false;
+      }
+    }
+  };
+
+  useEffect(() => {
+    // Primary: listen to Supabase auth state changes.
+    // This fires regardless of how the session arrives (redirect, URL listener, etc.)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, authSession) => {
+      if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && authSession?.user) {
+        if (googleAuthLoadingRef.current || entryStep === 'boot') {
+          void syncClientSessionFromSupabaseUser(authSession.user).catch(() => {
+            setAuthFeedback('No fue posible cargar tu perfil de Google.');
+            setGoogleAuthLoading(false);
+            googleAuthLoadingRef.current = false;
+          });
+        }
+      }
+    });
+
+    // Secondary: catch the redirect URL when Expo Go doesn't intercept it via openAuthSessionAsync
+    const urlSubscription = Linking.addEventListener('url', ({ url }) => {
+      void handleIncomingUrl(url);
+    });
+
+    return () => {
+      subscription.unsubscribe();
+      urlSubscription.remove();
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entryStep]);
+
   const handleStartGoogleAuth = async () => {
-    const provider: AuthProvider = 'google';
-    const identifier = resolveIdentifier(provider);
-    const profile = await loadClientProfile(identifier);
-
-    setAuthProvider(provider);
-    if (profile?.name) {
-      await persistSessionAndOpenHome(provider, identifier, profile.name);
+    if (googleAuthLoading) {
       return;
     }
 
-    setProfileName('');
-    setEntryStep('profile');
+    setGoogleAuthLoading(true);
+    googleAuthLoadingRef.current = true;
+    setAuthProvider('google');
+    setAuthFeedback(null);
+
+    // DEBUG: show the exact redirect URI so the user knows what to add in Supabase
+    console.log('[OAuth] OAUTH_REDIRECT_URI =>', OAUTH_REDIRECT_URI);
+
+    try {
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: OAUTH_REDIRECT_URI,
+          skipBrowserRedirect: true,
+        },
+      });
+
+      if (error || !data?.url) {
+        throw error ?? new Error('No fue posible iniciar sesión con Google.');
+      }
+
+      // Open the system browser and let Supabase redirect back into the app.
+      // The app listens for the deep link and the Supabase auth state change.
+      await WebBrowser.openBrowserAsync(data.url);
+
+      // Prevent infinite loading when Expo Go does not complete redirect callbacks.
+      setTimeout(() => {
+        if (googleAuthLoadingRef.current) {
+          setGoogleAuthLoading(false);
+          googleAuthLoadingRef.current = false;
+          setAuthFeedback('No se pudo completar Google en Expo Go. Usa Crear cuenta con correo.');
+        }
+      }, 12000);
+    } catch {
+      setAuthFeedback('No fue posible iniciar con Google. Revisa la configuración de OAuth en Supabase.');
+      setGoogleAuthLoading(false);
+      googleAuthLoadingRef.current = false;
+    }
   };
 
-  const handleStartPhoneAuth = () => {
-    const sanitized = phoneNumber.replace(/\D/g, '');
-    if (sanitized.length < 10) {
-      setAuthFeedback('Ingresa un número de teléfono válido.');
+  const handleEmailAuth = async () => {
+    const normalizedEmail = emailValue.trim().toLowerCase();
+    const password = passwordValue;
+    const baseName = normalizedEmail.split('@')[0] ?? 'Cliente';
+
+    if (!normalizedEmail || !normalizedEmail.includes('@')) {
+      setAuthFeedback('Ingresa un correo válido.');
       return;
     }
 
-    setAuthFeedback('Código enviado. Revisa tus SMS.');
-    setOtpCode('');
-    setOtpSecondsLeft(35);
-    setAuthProvider('phone');
-    setEntryStep('otp');
-  };
-
-  const handleVerifyOtp = async () => {
-    if (otpCode.length !== 6 || authProvider !== 'phone') {
-      setAuthFeedback('El código OTP debe tener 6 dígitos.');
+    if (password.length < 6) {
+      setAuthFeedback('La contraseña debe tener al menos 6 caracteres.');
       return;
     }
 
-    const identifier = resolveIdentifier('phone');
-    const profile = await loadClientProfile(identifier);
+    setAuthFeedback(null);
+    setAuthProvider('email');
+    setEmailAuthLoading(true);
+    googleAuthLoadingRef.current = false;
 
-    if (profile?.name) {
-      await persistSessionAndOpenHome('phone', identifier, profile.name);
-      return;
+    try {
+      if (emailAuthMode === 'login') {
+        const { data, error } = await supabase.auth.signInWithPassword({
+          email: normalizedEmail,
+          password,
+        });
+
+        if (error || !data.user) {
+          throw error ?? new Error('No fue posible iniciar sesión. Verifica correo y contraseña.');
+        }
+
+        await syncClientSessionFromSupabaseUser(data.user, 'email');
+        return;
+      }
+
+      const registerResponse = await fetch(`${API_BASE_URL}/api/client/auth/register`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          email: normalizedEmail,
+          password,
+          name: baseName,
+        }),
+      });
+
+      const registerPayload = (await registerResponse.json().catch(() => null)) as { message?: string } | null;
+
+      if (!registerResponse.ok) {
+        throw new Error(registerPayload?.message ?? 'No fue posible crear la cuenta.');
+      }
+
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: normalizedEmail,
+        password,
+      });
+
+      if (error || !data.user) {
+        throw error ?? new Error('No fue posible iniciar sesión con la cuenta creada.');
+      }
+
+      const nextSession: ClientSession = {
+        provider: 'email',
+        identifier: data.user.id,
+        name: baseName,
+        email: normalizedEmail,
+      };
+
+      try {
+        await AsyncStorage.setItem(CLIENT_SESSION_KEY, JSON.stringify(nextSession));
+      } catch {
+        // Allow navigation even if local cache fails.
+      }
+
+      setSession(nextSession);
+      setAuthProvider('email');
+      setProfileName(baseName);
+      setProfileEmail(normalizedEmail);
+      setProfilePhone('');
+      setEmailAuthLoading(false);
+      googleAuthLoadingRef.current = false;
+      setAuthFeedback('Cuenta creada. Completa tus datos para finalizar.');
+      setEntryStep('profile');
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : emailAuthMode === 'login'
+            ? 'No fue posible iniciar sesión. Verifica correo y contraseña.'
+            : 'No fue posible crear tu cuenta. Verifica correo y contraseña.';
+      setAuthFeedback(message);
+      setEmailAuthLoading(false);
+      googleAuthLoadingRef.current = false;
     }
-
-    setProfileName('');
-    setEntryStep('profile');
-    setAuthFeedback('Código validado. Completa tu perfil rápido.');
   };
 
   const handleSaveProfile = async () => {
-    const trimmedName = profileName.trim();
-    if (!trimmedName || !authProvider) {
+    if (!authProvider) {
       setAuthFeedback('Escribe tu nombre para continuar.');
       return;
     }
 
-    const identifier = resolveIdentifier(authProvider);
-    const nextProfile: ClientRegistrationProfile = {
-      name: trimmedName,
-      provider: authProvider,
-      identifier,
-      phone: authProvider === 'phone' ? phoneNumber.replace(/\D/g, '') : undefined,
-      profilePhotoUrl: '',
-      registrationComplete: true,
-    };
-    await saveClientProfile(nextProfile);
-
-    await persistSessionAndOpenHome(authProvider, identifier, trimmedName);
-  };
-
-  const handleResendOtp = () => {
-    if (otpSecondsLeft > 0) {
-      return;
-    }
-
-    setOtpSecondsLeft(35);
-    setAuthFeedback('Nuevo código enviado por SMS.');
-  };
-
-  const handleQuickDemoAccess = async () => {
-    const provider: AuthProvider = 'google';
-    const identifier = 'demo-client-local';
-    const demoName = 'Cliente Demo';
-
-    try {
-      await saveClientProfile({
-        name: demoName,
-        provider,
-        identifier,
-        phone: '3000000000',
-        profilePhotoUrl: '',
-        registrationComplete: true,
-      });
-    } catch {
-      // Continue with transient demo access.
-    }
-
-    await persistSessionAndOpenHome(provider, identifier, demoName);
+    await persistEditableProfile({ navigateHome: true });
   };
 
   const loadClientHistory = async () => {
@@ -947,6 +1307,8 @@ export default function App() {
   }
 
   if (entryStep === 'login') {
+    const isAuthBusy = googleAuthLoading || emailAuthLoading;
+
     return (
       <View style={styles.authScreen}>
         <View style={styles.authHeroCard}>
@@ -954,84 +1316,73 @@ export default function App() {
             <MaterialCommunityIcons name="map-marker-radius" size={34} color="#0F766E" />
           </View>
           <Text style={styles.authTitle}>Bienvenido Cliente</Text>
-          <Text style={styles.authSubtitle}>Ingresa con Google o tu número de teléfono.</Text>
+          <Text style={styles.authSubtitle}>
+            {emailAuthMode === 'register'
+              ? 'Primero crea tu cuenta con correo y luego podrás iniciar sesión.'
+              : 'Inicia sesión con el correo que ya registraste.'}
+          </Text>
         </View>
-
-        <TouchableOpacity style={styles.authPrimaryButton} onPress={handleStartGoogleAuth}>
-          <View style={styles.authButtonContentRow}>
-            <MaterialCommunityIcons name="google" size={20} color="#FFFFFF" />
-            <Text style={styles.authPrimaryButtonText}>Continuar con Google</Text>
-          </View>
-        </TouchableOpacity>
-
-        <Text style={styles.authHint}>o continúa con número</Text>
-
-        <View style={styles.authPhoneInputRow}>
-          <View style={styles.authPhonePrefixBadge}>
-            <Text style={styles.authPhonePrefixText}>+57</Text>
-          </View>
-          <TextInput
-            value={phoneNumber}
-            onChangeText={setPhoneNumber}
-            placeholder="3001234567"
-            placeholderTextColor="#94A3B8"
-            keyboardType="phone-pad"
-            style={styles.authPhoneInput}
-          />
-        </View>
-
-        <TouchableOpacity style={styles.authSecondaryButton} onPress={handleStartPhoneAuth}>
-          <View style={styles.authButtonContentRow}>
-            <MaterialCommunityIcons name="cellphone-message" size={19} color="#FFFFFF" />
-            <Text style={styles.authSecondaryButtonText}>Continuar con número de teléfono</Text>
-          </View>
-        </TouchableOpacity>
-
-        <TouchableOpacity style={styles.authDemoButton} onPress={handleQuickDemoAccess}>
-          <MaterialCommunityIcons name="flash" size={18} color="#0F172A" />
-          <Text style={styles.authDemoButtonText}>Entrar rápido para pruebas</Text>
-        </TouchableOpacity>
-
-        {authFeedback ? <Text style={styles.authFeedback}>{authFeedback}</Text> : null}
-      </View>
-    );
-  }
-
-  if (entryStep === 'otp') {
-    return (
-      <View style={styles.authScreen}>
-        <Text style={styles.authTitle}>Verifica tu número</Text>
-        <Text style={styles.authSubtitle}>Ingresa el código OTP de 6 dígitos.</Text>
 
         <TextInput
-          value={otpCode}
-          onChangeText={(value) => setOtpCode(value.replace(/\D/g, '').slice(0, 6))}
-          placeholder="123456"
+          value={emailValue}
+          onChangeText={setEmailValue}
+          placeholder="correo@ejemplo.com"
           placeholderTextColor="#94A3B8"
-          keyboardType="number-pad"
-          autoComplete="sms-otp"
-          textContentType="oneTimeCode"
-          maxLength={6}
-          style={styles.authOtpInput}
+          keyboardType="email-address"
+          autoCapitalize="none"
+          autoCorrect={false}
+          editable={!isAuthBusy}
+          style={styles.authInput}
         />
 
-        <TouchableOpacity style={styles.authPrimaryButton} onPress={handleVerifyOtp}>
-          <Text style={styles.authPrimaryButtonText}>Verificar código</Text>
-        </TouchableOpacity>
+        <TextInput
+          value={passwordValue}
+          onChangeText={setPasswordValue}
+          placeholder="Contraseña"
+          placeholderTextColor="#94A3B8"
+          secureTextEntry
+          editable={!isAuthBusy}
+          style={styles.authInput}
+        />
 
-        <TouchableOpacity style={styles.authDemoButton} onPress={() => setOtpCode('123456')}>
-          <MaterialCommunityIcons name="numeric-6-circle" size={18} color="#0F172A" />
-          <Text style={styles.authDemoButtonText}>Usar OTP demo 123456</Text>
+        <TouchableOpacity
+          style={[styles.authSecondaryButton, emailAuthLoading && styles.disabledButton]}
+          onPress={handleEmailAuth}
+          disabled={isAuthBusy}
+        >
+          <Text style={styles.authSecondaryButtonText}>
+            {emailAuthLoading
+              ? (emailAuthMode === 'register' ? 'Creando cuenta...' : 'Ingresando...')
+              : (emailAuthMode === 'register' ? 'Crear cuenta con correo' : 'Ingresar con correo')}
+          </Text>
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.authGhostButton, otpSecondsLeft > 0 && styles.authGhostButtonDisabled]}
-          onPress={handleResendOtp}
-          disabled={otpSecondsLeft > 0}
+          style={[styles.authGhostButton, isAuthBusy && styles.authGhostButtonDisabled]}
+          onPress={() => {
+            setEmailAuthMode((prev) => (prev === 'register' ? 'login' : 'register'));
+            setAuthFeedback(null);
+          }}
+          disabled={isAuthBusy}
         >
           <Text style={styles.authGhostButtonText}>
-            {otpSecondsLeft > 0 ? `Reenviar en ${otpSecondsLeft}s` : 'Reenviar código'}
+            {emailAuthMode === 'register'
+              ? 'Ya tengo cuenta, quiero iniciar sesión'
+              : 'No tengo cuenta, quiero crearla'}
           </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.authPrimaryButton, googleAuthLoading && styles.disabledButton]}
+          onPress={handleStartGoogleAuth}
+          disabled={isAuthBusy}
+        >
+          <View style={styles.authButtonContentRow}>
+            <MaterialCommunityIcons name="google" size={20} color="#FFFFFF" />
+            <Text style={styles.authPrimaryButtonText}>
+              {googleAuthLoading ? 'Conectando con Google...' : 'Continuar con Google'}
+            </Text>
+          </View>
         </TouchableOpacity>
 
         {authFeedback ? <Text style={styles.authFeedback}>{authFeedback}</Text> : null}
@@ -1048,13 +1399,39 @@ export default function App() {
         <TextInput
           value={profileName}
           onChangeText={setProfileName}
-          placeholder="Tu nombre"
+          placeholder="Tu nombre completo"
           placeholderTextColor="#94A3B8"
           style={styles.authInput}
         />
 
-        <TouchableOpacity style={styles.authPrimaryButton} onPress={handleSaveProfile}>
-          <Text style={styles.authPrimaryButtonText}>Guardar y continuar</Text>
+        <TextInput
+          value={profileEmail}
+          onChangeText={setProfileEmail}
+          placeholder="correo@ejemplo.com"
+          placeholderTextColor="#94A3B8"
+          keyboardType="email-address"
+          autoCapitalize="none"
+          autoCorrect={false}
+          style={styles.authInput}
+        />
+
+        <TextInput
+          value={profilePhone}
+          onChangeText={setProfilePhone}
+          placeholder="Teléfono"
+          placeholderTextColor="#94A3B8"
+          keyboardType="phone-pad"
+          style={styles.authInput}
+        />
+
+        <TouchableOpacity
+          style={[styles.authPrimaryButton, savingProfileChanges && styles.disabledButton]}
+          onPress={handleSaveProfile}
+          disabled={savingProfileChanges}
+        >
+          <Text style={styles.authPrimaryButtonText}>
+            {savingProfileChanges ? 'Guardando...' : 'Guardar y continuar'}
+          </Text>
         </TouchableOpacity>
 
         {authFeedback ? <Text style={styles.authFeedback}>{authFeedback}</Text> : null}
@@ -1178,24 +1555,64 @@ export default function App() {
               <Text style={styles.profilePhotoCta}>Subir o cambiar foto</Text>
             </TouchableOpacity>
 
-            <View style={styles.readonlyRow}>
-              <Text style={styles.readonlyLabel}>Nombre</Text>
-              <Text style={styles.readonlyValue}>{clientProfile?.name ?? session?.name ?? 'Sin dato'}</Text>
+            <View style={styles.profileFieldBlock}>
+              <Text style={styles.readonlyLabel}>Nombre completo</Text>
+              <TextInput
+                value={profileName}
+                onChangeText={setProfileName}
+                placeholder="Tu nombre completo"
+                placeholderTextColor="#94A3B8"
+                style={styles.authInput}
+              />
+            </View>
+            <View style={styles.profileFieldBlock}>
+              <Text style={styles.readonlyLabel}>Correo</Text>
+              <TextInput
+                value={profileEmail}
+                onChangeText={setProfileEmail}
+                placeholder="correo@ejemplo.com"
+                placeholderTextColor="#94A3B8"
+                keyboardType="email-address"
+                autoCapitalize="none"
+                autoCorrect={false}
+                style={styles.authInput}
+              />
+            </View>
+            <View style={styles.profileFieldBlock}>
+              <Text style={styles.readonlyLabel}>Teléfono</Text>
+              <TextInput
+                value={profilePhone}
+                onChangeText={setProfilePhone}
+                placeholder="Teléfono"
+                placeholderTextColor="#94A3B8"
+                keyboardType="phone-pad"
+                style={styles.authInput}
+              />
             </View>
             <View style={styles.readonlyRow}>
               <Text style={styles.readonlyLabel}>Proveedor</Text>
-              <Text style={styles.readonlyValue}>{clientProfile?.provider === 'phone' ? 'Teléfono' : 'Google'}</Text>
-            </View>
-            <View style={styles.readonlyRow}>
-              <Text style={styles.readonlyLabel}>Teléfono</Text>
-              <Text style={styles.readonlyValue}>{clientProfile?.phone ?? 'No aplica'}</Text>
+              <Text style={styles.readonlyValue}>
+                {clientProfile?.provider === 'email' ? 'Correo' : 'Google'}
+              </Text>
             </View>
             <View style={styles.readonlyRow}>
               <Text style={styles.readonlyLabel}>ID de cuenta</Text>
               <Text style={styles.readonlyValue}>{session?.identifier ?? 'Sin dato'}</Text>
             </View>
 
-            <Text style={styles.readonlyFootnote}>Los datos personales no se pueden modificar después del registro.</Text>
+            <TouchableOpacity
+              style={[styles.authPrimaryButton, savingProfileChanges && styles.disabledButton]}
+              onPress={() => void persistEditableProfile()}
+              disabled={savingProfileChanges}
+            >
+              <Text style={styles.authPrimaryButtonText}>
+                {savingProfileChanges ? 'Guardando...' : 'Guardar cambios'}
+              </Text>
+            </TouchableOpacity>
+
+            <Text style={styles.readonlyFootnote}>
+              La foto se conserva para esta cuenta en tu app actual, pero hoy no está subida a Supabase Storage; para persistirla entre dispositivos falta ese paso.
+            </Text>
           </ScrollView>
         ) : null}
 
@@ -1618,6 +2035,28 @@ const styles = StyleSheet.create({
     color: '#0F766E',
     fontWeight: '700',
   },
+  redirectUriBox: {
+    marginTop: 16,
+    marginBottom: 4,
+    backgroundColor: '#F1F5F9',
+    borderRadius: 10,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+  },
+  redirectUriLabel: {
+    fontSize: 11,
+    color: '#64748B',
+    marginBottom: 6,
+    fontWeight: '600',
+  },
+  redirectUriValue: {
+    fontSize: 11,
+    color: '#0F766E',
+    fontFamily: 'monospace',
+    fontWeight: '700',
+    flexWrap: 'wrap',
+  },
   bottomContainer: { marginBottom: 40 },
   button: { backgroundColor: '#10B981', paddingVertical: 16, borderRadius: 12, alignItems: 'center', elevation: 5 },
   buttonText: { color: '#FFFFFF', fontSize: 18, fontWeight: 'bold' },
@@ -1726,6 +2165,9 @@ const styles = StyleSheet.create({
     color: '#0F766E',
     fontSize: 13,
     fontWeight: '800',
+  },
+  profileFieldBlock: {
+    marginBottom: 10,
   },
   readonlyRow: {
     backgroundColor: '#FFFFFF',
