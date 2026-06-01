@@ -592,8 +592,12 @@ app.post('/api/trips', async (req: Request, res: Response) => {
     return res.status(400).json({ message: 'Datos de viaje invalidos.' });
   }
 
-  const clientExternalId =
-    typeof client?.id === 'string' && client.id.trim().length > 0 ? client.id.trim() : `guest-${Date.now()}`;
+  const clientExternalId = typeof client?.id === 'string' && client.id.trim().length > 0 ? client.id.trim() : '';
+
+  if (!clientExternalId) {
+    return res.status(401).json({ message: 'Debes iniciar sesión para solicitar un viaje.' });
+  }
+
   const clientId = normalizeExternalIdToUuid(clientExternalId);
   const clientName = typeof client?.name === 'string' && client.name.trim().length > 0 ? client.name.trim() : 'Cliente';
 

@@ -935,14 +935,22 @@ export default function App() {
   };
 
   const loadClientHistory = async () => {
-    if (!session?.identifier) {
+    let clientIdentifier = session?.identifier ?? '';
+
+    if (!clientIdentifier) {
+      const { data } = await supabase.auth.getUser();
+      clientIdentifier = data.user?.id ?? '';
+    }
+
+    if (!clientIdentifier) {
       setClientTripHistory([]);
+      setAuthFeedback('Debes iniciar sesión para ver tu historial.');
       return;
     }
 
     setLoadingClientHistory(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/client/trips/${session.identifier}`);
+      const response = await fetch(`${API_BASE_URL}/api/client/trips/${clientIdentifier}`);
       const data = (await response.json()) as { trips?: TripRecord[] };
       setClientTripHistory(Array.isArray(data.trips) ? data.trips : []);
     } catch {
@@ -1160,6 +1168,20 @@ export default function App() {
     notifiedAcceptedTripIdRef.current = null;
 
     try {
+      let clientIdentifier = session?.identifier ?? '';
+
+      if (!clientIdentifier) {
+        const { data } = await supabase.auth.getUser();
+        clientIdentifier = data.user?.id ?? '';
+      }
+
+      if (!clientIdentifier) {
+        setDriverError('Debes iniciar sesión para solicitar un viaje.');
+        setIsMatching(false);
+        setRequestingDriver(false);
+        return;
+      }
+
       const response = await fetch(`${API_BASE_URL}/api/trips`, {
         method: 'POST',
         headers: {
@@ -1179,14 +1201,10 @@ export default function App() {
           fare: computedFare,
           serviceType: destination.serviceType ?? 'pasajero',
           packageNotes: destination.packageNotes,
-          ...(session
-            ? {
-                client: {
-                  id: session.identifier,
-                  name: session.name,
-                },
-              }
-            : {}),
+          client: {
+            id: clientIdentifier,
+            name: session?.name ?? clientProfile?.name ?? 'Cliente',
+          },
         }),
       });
 
