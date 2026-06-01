@@ -1240,13 +1240,23 @@ export default function App() {
             {isTripCardCollapsed ? (
               <View style={styles.collapsedSummaryRow}>
                 <View style={styles.collapsedSummaryTextBlock}>
-                  <Text style={styles.tripMetricLabel}>Destino</Text>
-                  <Text style={styles.collapsedDestinationText}>{incomingTrip.destination.name}</Text>
+                  <Text style={styles.tripMetricLabel}>Recoger en</Text>
+                  <Text style={styles.collapsedDestinationText}>{incomingTrip.origin.name}</Text>
+                  <Text style={styles.collapsedSecondaryText}>Destino: {incomingTrip.destination.name}</Text>
                 </View>
                 <Text style={styles.collapsedFareText}>{formatCop(incomingTrip.fare)}</Text>
               </View>
             ) : (
               <>
+                <View style={styles.tripMetricRow}>
+                  <Text style={styles.tripMetricLabel}>
+                    {incomingTrip.serviceType === 'encomienda'
+                      ? '¿Dónde recoge la encomienda?'
+                      : '¿Dónde recoge al pasajero?'}
+                  </Text>
+                  <Text style={styles.tripMetricValue}>{incomingTrip.origin.name}</Text>
+                </View>
+
                 <View style={styles.tripMetricRow}>
                   <Text style={styles.tripMetricLabel}>¿A dónde va?</Text>
                   <Text style={styles.tripMetricValue}>{incomingTrip.destination.name}</Text>
@@ -1812,6 +1822,12 @@ const styles = StyleSheet.create({
     color: '#0F172A',
     fontSize: 18,
     fontWeight: '700',
+  },
+  collapsedSecondaryText: {
+    marginTop: 2,
+    color: '#475569',
+    fontSize: 12,
+    fontWeight: '600',
   },
   collapsedFareText: {
     color: '#C2410C',
