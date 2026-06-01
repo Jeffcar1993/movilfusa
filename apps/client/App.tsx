@@ -148,6 +148,7 @@ const formatDateTime = (value?: string) => {
 };
 const CLIENT_SESSION_KEY = 'movilfusa:client:session';
 const CLIENT_PROFILE_PREFIX = 'movilfusa:client:profile:';
+const CLIENT_AVATAR_BUCKET = 'client-avatars';
 const getClientProfileKey = (identifier: string) => `${CLIENT_PROFILE_PREFIX}${identifier}`;
 const OAUTH_REDIRECT_URI = Linking.createURL('/');
 
@@ -200,6 +201,46 @@ const resolveAuthProviderFromUser = (user: User): AuthProvider => {
   return 'google';
 };
 
+const getFileExtensionFromUri = (uri: string): string => {
+  const withoutQuery = uri.split('?')[0] ?? '';
+  const rawExtension = withoutQuery.includes('.') ? withoutQuery.split('.').pop() ?? '' : '';
+  const normalized = rawExtension.toLowerCase();
+
+  if (normalized === 'jpeg' || normalized === 'jpg') {
+    return 'jpg';
+  }
+
+  if (normalized === 'png' || normalized === 'webp') {
+    return normalized;
+  }
+
+  return 'jpg';
+};
+
+const getPublicAvatarPathFromUrl = (url?: string): string | null => {
+  if (!url) {
+    return null;
+  }
+
+  const marker = `/storage/v1/object/public/${CLIENT_AVATAR_BUCKET}/`;
+  const markerIndex = url.indexOf(marker);
+
+  if (markerIndex === -1) {
+    return null;
+  }
+
+  const encodedPath = url.slice(markerIndex + marker.length).split('?')[0] ?? '';
+  if (!encodedPath) {
+    return null;
+  }
+
+  try {
+    return decodeURIComponent(encodedPath);
+  } catch {
+    return encodedPath;
+  }
+};
+
 export default function App() {
   const [location, setLocation] = useState<Location.LocationObject | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -248,6 +289,7 @@ export default function App() {
   const [clientTripHistory, setClientTripHistory] = useState<TripRecord[]>([]);
   const [loadingClientHistory, setLoadingClientHistory] = useState(false);
   const [clientProfile, setClientProfile] = useState<ClientRegistrationProfile | null>(null);
+  const [uploadingProfilePhoto, setUploadingProfilePhoto] = useState(false);
   const mapRef = useRef<MapView | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const currentTripIdRef = useRef<string | null>(null);
@@ -430,39 +472,117 @@ export default function App() {
   };
 
   const handlePickProfilePhoto = async () => {
-    if (!session?.identifier) {
+    if (uploadingProfilePhoto) {
       return;
     }
 
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) {
-      setAuthFeedback('Debes habilitar galería para subir foto de perfil.');
+    setUploadingProfilePhoto(true);
+
+    let identifier = session?.identifier ?? '';
+
+    if (!identifier) {
+      const { data } = await supabase.auth.getUser();
+      identifier = data.user?.id ?? '';
+    }
+
+    if (!identifier) {
+      setAuthFeedback('No fue posible resolver tu usuario para subir la foto. Inicia sesión nuevamente.');
+      setUploadingProfilePhoto(false);
       return;
     }
 
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
-      allowsEditing: true,
-      quality: 0.7,
-      aspect: [1, 1],
-    });
+    try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) {
+        setAuthFeedback('Debes habilitar galería para subir foto de perfil.');
+        return;
+      }
 
-    if (result.canceled || !result.assets[0]?.uri) {
-      return;
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsEditing: true,
+        quality: 0.7,
+        aspect: [1, 1],
+      });
+
+      if (result.canceled || !result.assets[0]?.uri) {
+        return;
+      }
+
+      const selectedAsset = result.assets[0];
+      const fileExtension = getFileExtensionFromUri(selectedAsset.uri);
+      const contentType = selectedAsset.mimeType || `image/${fileExtension === 'jpg' ? 'jpeg' : fileExtension}`;
+      const storagePath = `${identifier}/avatar-${Date.now()}.${fileExtension}`;
+
+      const response = await fetch(selectedAsset.uri);
+      const fileArrayBuffer = await response.arrayBuffer();
+
+      const { error: uploadError } = await supabase.storage
+        .from(CLIENT_AVATAR_BUCKET)
+        .upload(storagePath, fileArrayBuffer, {
+          contentType,
+          cacheControl: '3600',
+          upsert: true,
+        });
+
+      if (uploadError) {
+        throw uploadError;
+      }
+
+      const { data: publicUrlData } = supabase.storage
+        .from(CLIENT_AVATAR_BUCKET)
+        .getPublicUrl(storagePath);
+
+      const uploadedPhotoUrl = publicUrlData.publicUrl;
+      const previousPhotoPath = getPublicAvatarPathFromUrl(clientProfile?.profilePhotoUrl);
+
+      const updatedProfile: ClientRegistrationProfile = {
+        name: clientProfile?.name ?? session?.name ?? (profileName.trim() || 'Cliente'),
+        provider: clientProfile?.provider ?? session?.provider ?? 'email',
+        identifier,
+        email: clientProfile?.email ?? session?.email,
+        phone: clientProfile?.phone,
+        profilePhotoUrl: uploadedPhotoUrl,
+        registrationComplete: true,
+      };
+
+      await saveClientProfile(updatedProfile);
+
+      const { error: profileUpsertError } = await supabase.from('profiles').upsert(
+        {
+          id: identifier,
+          role: 'client',
+          name: updatedProfile.name,
+          avatar_url: uploadedPhotoUrl,
+        },
+        { onConflict: 'id' },
+      );
+
+      if (profileUpsertError) {
+        throw profileUpsertError;
+      }
+
+      const { error: metadataError } = await supabase.auth.updateUser({
+        data: {
+          name: updatedProfile.name,
+          avatar_url: uploadedPhotoUrl,
+        },
+      });
+
+      if (metadataError) {
+        throw metadataError;
+      }
+
+      if (previousPhotoPath && previousPhotoPath !== storagePath) {
+        void supabase.storage.from(CLIENT_AVATAR_BUCKET).remove([previousPhotoPath]);
+      }
+
+      setAuthFeedback('Foto de perfil subida y sincronizada en Supabase.');
+    } catch {
+      setAuthFeedback('No fue posible subir la foto a Supabase. Intenta de nuevo.');
+    } finally {
+      setUploadingProfilePhoto(false);
     }
-
-    const updatedProfile: ClientRegistrationProfile = {
-      name: clientProfile?.name ?? session?.name ?? (profileName.trim() || 'Cliente'),
-      provider: clientProfile?.provider ?? session?.provider ?? 'email',
-      identifier: session.identifier,
-      email: clientProfile?.email ?? session?.email,
-      phone: clientProfile?.phone,
-      profilePhotoUrl: result.assets[0].uri,
-      registrationComplete: true,
-    };
-
-    await saveClientProfile(updatedProfile);
-    setAuthFeedback('Foto seleccionada. Guarda cambios para persistirla en tu perfil.');
   };
 
   const persistEditableProfile = async (options?: { navigateHome?: boolean }) => {
@@ -1607,7 +1727,11 @@ export default function App() {
 
         {profileSection === 'details' ? (
           <ScrollView contentContainerStyle={styles.profileDetailsBody}>
-            <TouchableOpacity style={styles.profilePhotoWrap} onPress={() => void handlePickProfilePhoto()}>
+            <TouchableOpacity
+              style={[styles.profilePhotoWrap, uploadingProfilePhoto && styles.disabledButton]}
+              onPress={() => void handlePickProfilePhoto()}
+              disabled={uploadingProfilePhoto}
+            >
               {clientProfile?.profilePhotoUrl ? (
                 <Image source={{ uri: clientProfile.profilePhotoUrl }} style={styles.profilePhoto} />
               ) : (
@@ -1615,7 +1739,9 @@ export default function App() {
                   <MaterialCommunityIcons name="account" size={34} color="#334155" />
                 </View>
               )}
-              <Text style={styles.profilePhotoCta}>Subir o cambiar foto</Text>
+              <Text style={styles.profilePhotoCta}>
+                {uploadingProfilePhoto ? 'Subiendo foto...' : 'Subir o cambiar foto'}
+              </Text>
             </TouchableOpacity>
 
             <View style={styles.profileFieldBlock}>
