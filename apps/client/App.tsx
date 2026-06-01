@@ -219,6 +219,8 @@ export default function App() {
   const googleAuthLoadingRef = useRef(false);
   const splashOpacity = useRef(new Animated.Value(0)).current;
   const splashScale = useRef(new Animated.Value(0.95)).current;
+  const splashTranslateY = useRef(new Animated.Value(14)).current;
+  const splashPulse = useRef(new Animated.Value(1)).current;
   
   // Estados de control de rutas y UI
   const [searchMode, setSearchMode] = useState<'origin' | 'destination' | null>(null);
@@ -610,11 +612,13 @@ export default function App() {
 
   useEffect(() => {
     let isMounted = true;
+    let entranceAnimation: Animated.CompositeAnimation | null = null;
+    let pulseAnimation: Animated.CompositeAnimation | null = null;
 
     const bootstrapSession = async () => {
       let initialUser: User | null = null;
 
-      Animated.parallel([
+      entranceAnimation = Animated.parallel([
         Animated.timing(splashOpacity, {
           toValue: 1,
           duration: 420,
@@ -627,7 +631,34 @@ export default function App() {
           easing: Easing.out(Easing.back(1.2)),
           useNativeDriver: true,
         }),
-      ]).start();
+        Animated.timing(splashTranslateY, {
+          toValue: 0,
+          duration: 620,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+      ]);
+
+      pulseAnimation = Animated.loop(
+        Animated.sequence([
+          Animated.timing(splashPulse, {
+            toValue: 1.02,
+            duration: 850,
+            easing: Easing.inOut(Easing.quad),
+            useNativeDriver: true,
+          }),
+          Animated.timing(splashPulse, {
+            toValue: 1,
+            duration: 850,
+            easing: Easing.inOut(Easing.quad),
+            useNativeDriver: true,
+          }),
+        ]),
+      );
+
+      entranceAnimation.start(() => {
+        pulseAnimation?.start();
+      });
 
       try {
         const { data, error } = await supabase.auth.getSession();
@@ -652,15 +683,17 @@ export default function App() {
           setAuthFeedback('No fue posible restaurar tu sesión de Google.');
           setEntryStep('login');
         });
-      }, 850);
+      }, 1500);
     };
 
     bootstrapSession();
 
     return () => {
       isMounted = false;
+      entranceAnimation?.stop();
+      pulseAnimation?.stop();
     };
-  }, [splashOpacity, splashScale]);
+  }, [splashOpacity, splashScale, splashTranslateY, splashPulse]);
 
   useEffect(() => {
     if (entryStep !== 'home' || location) {
@@ -1316,10 +1349,22 @@ export default function App() {
   if (entryStep === 'boot') {
     return (
       <View style={styles.welcomeContainer}>
-        <Animated.View style={[styles.brandContainer, { opacity: splashOpacity, transform: [{ scale: splashScale }] }]}>
-          <Text style={styles.title}>MovilFusa</Text>
-          <Text style={styles.subtitle}>Conecta Fusagasugá en segundos</Text>
-        </Animated.View>
+        <View style={styles.brandContainer}>
+          <Animated.Image
+            source={require('./src/img/logo.png')}
+            resizeMode="contain"
+            style={[
+              styles.splashLogo,
+              {
+                opacity: splashOpacity,
+                transform: [
+                  { translateY: splashTranslateY },
+                  { scale: Animated.multiply(splashScale, splashPulse) },
+                ],
+              },
+            ]}
+          />
+        </View>
       </View>
     );
   }
@@ -1879,8 +1924,13 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  welcomeContainer: { flex: 1, backgroundColor: '#1E3A8A', justifyContent: 'space-between', padding: 24 },
+  welcomeContainer: { flex: 1, backgroundColor: '#071633', justifyContent: 'center', padding: 24 },
   brandContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  splashLogo: {
+    width: '100%',
+    maxWidth: 360,
+    height: 360,
+  },
   title: { fontSize: 42, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 1 },
   subtitle: { fontSize: 16, color: '#E2E8F0', marginTop: 10, textAlign: 'center' },
   authScreen: {

@@ -144,6 +144,8 @@ export default function App() {
   });
   const splashOpacity = useRef(new Animated.Value(0)).current;
   const splashScale = useRef(new Animated.Value(0.95)).current;
+  const splashTranslateY = useRef(new Animated.Value(14)).current;
+  const splashPulse = useRef(new Animated.Value(1)).current;
   const [driverLocation, setDriverLocation] = useState(defaultRegion);
   const [locationReady, setLocationReady] = useState(false);
   const [locationError, setLocationError] = useState<string | null>(null);
@@ -160,11 +162,13 @@ export default function App() {
 
   useEffect(() => {
     let isMounted = true;
+    let entranceAnimation: Animated.CompositeAnimation | null = null;
+    let pulseAnimation: Animated.CompositeAnimation | null = null;
 
     const bootstrap = async () => {
       let sessionRaw: string | null = null;
 
-      Animated.parallel([
+      entranceAnimation = Animated.parallel([
         Animated.timing(splashOpacity, {
           toValue: 1,
           duration: 420,
@@ -177,7 +181,34 @@ export default function App() {
           easing: Easing.out(Easing.back(1.2)),
           useNativeDriver: true,
         }),
-      ]).start();
+        Animated.timing(splashTranslateY, {
+          toValue: 0,
+          duration: 620,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+      ]);
+
+      pulseAnimation = Animated.loop(
+        Animated.sequence([
+          Animated.timing(splashPulse, {
+            toValue: 1.02,
+            duration: 850,
+            easing: Easing.inOut(Easing.quad),
+            useNativeDriver: true,
+          }),
+          Animated.timing(splashPulse, {
+            toValue: 1,
+            duration: 850,
+            easing: Easing.inOut(Easing.quad),
+            useNativeDriver: true,
+          }),
+        ]),
+      );
+
+      entranceAnimation.start(() => {
+        pulseAnimation?.start();
+      });
 
       try {
         sessionRaw = await AsyncStorage.getItem(DRIVER_SESSION_KEY);
@@ -203,15 +234,17 @@ export default function App() {
         } catch {
           setEntryStep('login');
         }
-      }, 850);
+      }, 1500);
     };
 
     bootstrap();
 
     return () => {
       isMounted = false;
+      entranceAnimation?.stop();
+      pulseAnimation?.stop();
     };
-  }, [splashOpacity, splashScale]);
+  }, [splashOpacity, splashScale, splashTranslateY, splashPulse]);
 
   useEffect(() => {
     if (entryStep !== 'otp' || otpSecondsLeft <= 0) {
@@ -696,11 +729,23 @@ export default function App() {
   if (entryStep === 'boot') {
     return (
       <SafeAreaProvider>
-        <SafeAreaView style={styles.screen}>
-          <Animated.View style={[styles.driverBootContainer, { opacity: splashOpacity, transform: [{ scale: splashScale }] }]}>
-            <Text style={styles.kicker}>MovilFusa Driver</Text>
-            <Text style={styles.title}>Conduce con confianza</Text>
-          </Animated.View>
+        <SafeAreaView style={[styles.screen, styles.driverBootScreen]}>
+          <View style={styles.driverBootContainer}>
+            <Animated.Image
+              source={require('./assets/logo.png')}
+              resizeMode="contain"
+              style={[
+                styles.driverSplashLogo,
+                {
+                  opacity: splashOpacity,
+                  transform: [
+                    { translateY: splashTranslateY },
+                    { scale: Animated.multiply(splashScale, splashPulse) },
+                  ],
+                },
+              ]}
+            />
+          </View>
         </SafeAreaView>
       </SafeAreaProvider>
     );
@@ -1262,11 +1307,19 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
+  driverBootScreen: {
+    backgroundColor: '#071633',
+  },
   driverBootContainer: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 24,
+  },
+  driverSplashLogo: {
+    width: '100%',
+    maxWidth: 360,
+    height: 360,
   },
   driverAuthScreen: {
     flex: 1,
