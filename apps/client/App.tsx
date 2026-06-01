@@ -255,6 +255,7 @@ export default function App() {
   const [savingProfileChanges, setSavingProfileChanges] = useState(false);
   const [emailValue, setEmailValue] = useState('');
   const [passwordValue, setPasswordValue] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [profileEmail, setProfileEmail] = useState('');
   const [profilePhone, setProfilePhone] = useState('');
   const googleAuthLoadingRef = useRef(false);
@@ -1518,15 +1519,30 @@ export default function App() {
           style={styles.authInput}
         />
 
-        <TextInput
-          value={passwordValue}
-          onChangeText={setPasswordValue}
-          placeholder="Contraseña"
-          placeholderTextColor="#94A3B8"
-          secureTextEntry
-          editable={!isAuthBusy}
-          style={styles.authInput}
-        />
+        <View style={styles.authPasswordRow}>
+          <TextInput
+            value={passwordValue}
+            onChangeText={setPasswordValue}
+            placeholder="Contraseña"
+            placeholderTextColor="#94A3B8"
+            secureTextEntry={!showPassword}
+            editable={!isAuthBusy}
+            style={styles.authPasswordInput}
+          />
+          <TouchableOpacity
+            onPress={() => setShowPassword((prev) => !prev)}
+            disabled={isAuthBusy}
+            style={styles.passwordToggleButton}
+            accessibilityRole="button"
+            accessibilityLabel={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+          >
+            <MaterialCommunityIcons
+              name={showPassword ? 'eye-off-outline' : 'eye-outline'}
+              size={22}
+              color="#475569"
+            />
+          </TouchableOpacity>
+        </View>
 
         <TouchableOpacity
           style={[styles.authSecondaryButton, emailAuthLoading && styles.disabledButton]}
@@ -2117,6 +2133,30 @@ const styles = StyleSheet.create({
     color: '#0F172A',
     fontSize: 16,
     fontWeight: '600',
+  },
+  authPasswordRow: {
+    marginTop: 10,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingRight: 8,
+  },
+  authPasswordInput: {
+    flex: 1,
+    color: '#0F172A',
+    fontSize: 16,
+    fontWeight: '600',
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+  },
+  passwordToggleButton: {
+    width: 38,
+    height: 38,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   authPhoneInputRow: {
     marginTop: 10,
