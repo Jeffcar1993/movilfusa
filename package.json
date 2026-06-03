@@ -14,7 +14,10 @@
     "client": "npm run start --workspace=client -- --lan -c",
     "client:tunnel": "npm run start --workspace=client -- --tunnel -c",
     "driver": "npm run start --workspace=driver --",
-    "driver:tunnel": "npm run start --workspace=driver -- --tunnel -c"
+    "driver:tunnel": "npm run start --workspace=driver -- --tunnel -c",
+    "android": "npm run run:android --workspace=client",
+    "android:driver": "npm run run:android --workspace=driver",
+    "ios": "expo run:ios"
   },
   "keywords": [],
   "author": "",
@@ -22,5 +25,10 @@
   "type": "commonjs",
   "devDependencies": {
     "@types/node": "^25.9.0"
+  },
+  "dependencies": {
+    "expo": "~54.0.34",
+    "react": "19.1.0",
+    "react-native": "0.81.5"
   }
 }

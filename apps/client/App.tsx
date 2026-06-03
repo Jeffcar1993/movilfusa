@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   StyleSheet,
   Text,
@@ -244,6 +244,7 @@ const getPublicAvatarPathFromUrl = (url?: string): string | null => {
 export default function App() {
   const [location, setLocation] = useState<Location.LocationObject | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [refreshingLocation, setRefreshingLocation] = useState(false);
   const [entryStep, setEntryStep] = useState<ClientEntryStep>('boot');
   const [session, setSession] = useState<ClientSession | null>(null);
   const [authProvider, setAuthProvider] = useState<AuthProvider | null>(null);
@@ -731,6 +732,110 @@ export default function App() {
     return 5000;
   })();
 
+  const readMostAccurateLocation = useCallback(async (): Promise<Location.LocationObject | null> => {
+    let bestLocation: Location.LocationObject | null = null;
+
+    const keepBest = (candidate: Location.LocationObject | null) => {
+      if (!candidate) {
+        return;
+      }
+
+      const candidateAccuracy = candidate.coords.accuracy ?? Number.POSITIVE_INFINITY;
+      const bestAccuracy = bestLocation?.coords.accuracy ?? Number.POSITIVE_INFINITY;
+
+      if (!bestLocation || candidateAccuracy < bestAccuracy) {
+        bestLocation = candidate;
+      }
+    };
+
+    try {
+      const cached = await Location.getLastKnownPositionAsync({
+        maxAge: 15000,
+        requiredAccuracy: 80,
+      });
+      keepBest(cached);
+    } catch {
+      // Ignore cache lookup errors and continue with fresh GPS reads.
+    }
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const current = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.BestForNavigation,
+          mayShowUserSettingsDialog: true,
+        });
+
+        keepBest(current);
+
+        if ((current.coords.accuracy ?? Number.POSITIVE_INFINITY) <= 20) {
+          break;
+        }
+      } catch {
+        // Retry to get a better fix.
+      }
+    }
+
+    return bestLocation;
+  }, []);
+
+  const refreshCurrentLocation = useCallback(
+    async (options?: { setAsOrigin?: boolean; silent?: boolean }) => {
+      const setAsOrigin = options?.setAsOrigin ?? false;
+      const silent = options?.silent ?? false;
+
+      if (!silent) {
+        setLoadingGps(true);
+      }
+
+      setRefreshingLocation(true);
+
+      try {
+        const existingPermission = await Location.getForegroundPermissionsAsync();
+        let status = existingPermission.status;
+
+        if (status !== 'granted') {
+          const requestedPermission = await Location.requestForegroundPermissionsAsync();
+          status = requestedPermission.status;
+        }
+
+        if (status !== 'granted') {
+          setErrorMsg('Permiso de ubicacion denegado.');
+          return;
+        }
+
+        const nextLocation = await readMostAccurateLocation();
+        if (!nextLocation) {
+          setErrorMsg('No fue posible obtener una ubicacion precisa.');
+          return;
+        }
+
+        setLocation(nextLocation);
+        setErrorMsg(null);
+
+        setOrigin((previousOrigin) => {
+          if (!setAsOrigin && previousOrigin?.name !== 'Mi ubicación actual') {
+            return previousOrigin;
+          }
+
+          return {
+            latitude: nextLocation.coords.latitude,
+            longitude: nextLocation.coords.longitude,
+            name: 'Mi ubicación actual',
+            fare: previousOrigin?.fare,
+          };
+        });
+      } catch {
+        setErrorMsg('Error al obtener la ubicación.');
+      } finally {
+        if (!silent) {
+          setLoadingGps(false);
+        }
+        setRefreshingLocation(false);
+      }
+    },
+    [readMostAccurateLocation],
+  );
+
   useEffect(() => {
     let isMounted = true;
     let entranceAnimation: Animated.CompositeAnimation | null = null;
@@ -821,41 +926,63 @@ export default function App() {
       return;
     }
 
-    let isActive = true;
+    void refreshCurrentLocation();
+  }, [entryStep, location, refreshCurrentLocation]);
 
-    const requestLocation = async () => {
-      setLoadingGps(true);
+  useEffect(() => {
+    if (entryStep !== 'home') {
+      return;
+    }
+
+    let isMounted = true;
+    let subscription: Location.LocationSubscription | null = null;
+
+    const startLocationWatch = async () => {
       try {
-        const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status !== 'granted') {
-          if (isActive) {
-            setErrorMsg('Permiso de ubicación denegado.');
-          }
+        const permission = await Location.getForegroundPermissionsAsync();
+        if (permission.status !== 'granted') {
           return;
         }
 
-        const currentLocation = await Location.getCurrentPositionAsync({});
-        if (isActive) {
-          setLocation(currentLocation);
-          setErrorMsg(null);
-        }
+        subscription = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.High,
+            distanceInterval: 10,
+            timeInterval: 5000,
+            mayShowUserSettingsDialog: true,
+          },
+          (nextLocation) => {
+            if (!isMounted) {
+              return;
+            }
+
+            setLocation(nextLocation);
+
+            setOrigin((previousOrigin) => {
+              if (previousOrigin?.name !== 'Mi ubicación actual') {
+                return previousOrigin;
+              }
+
+              return {
+                ...previousOrigin,
+                latitude: nextLocation.coords.latitude,
+                longitude: nextLocation.coords.longitude,
+              };
+            });
+          },
+        );
       } catch {
-        if (isActive) {
-          setErrorMsg('Error al obtener la ubicación.');
-        }
-      } finally {
-        if (isActive) {
-          setLoadingGps(false);
-        }
+        // Live tracking is optional; fallback is the current GPS fix.
       }
     };
 
-    requestLocation();
+    void startLocationWatch();
 
     return () => {
-      isActive = false;
+      isMounted = false;
+      subscription?.remove();
     };
-  }, [entryStep, location]);
+  }, [entryStep]);
 
   const persistSessionAndOpenHome = async (provider: AuthProvider, identifier: string, name: string) => {
     const nextSession: ClientSession = { provider, identifier, name };
@@ -1875,12 +2002,10 @@ export default function App() {
           <TouchableOpacity
             style={styles.useLocationButton}
             onPress={() => {
-              if (location) {
-                setOrigin({ latitude: location.coords.latitude, longitude: location.coords.longitude, name: 'Mi ubicación actual' });
-              }
+              void refreshCurrentLocation({ setAsOrigin: true });
             }}
           >
-            <Text style={styles.useLocationText}>📍</Text>
+            <Text style={styles.useLocationText}>{refreshingLocation ? '...' : '📍'}</Text>
           </TouchableOpacity>
         </View>
         

@@ -1,0 +1,8 @@
+{
+  "android": {
+    "package": "com.anonymous.movilfusa"
+  },
+  "ios": {
+    "bundleIdentifier": "com.anonymous.movilfusa"
+  }
+}
