@@ -245,6 +245,7 @@ export default function App() {
   const [location, setLocation] = useState<Location.LocationObject | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [refreshingLocation, setRefreshingLocation] = useState(false);
+  const [locationAccuracyMeters, setLocationAccuracyMeters] = useState<number | null>(null);
   const [entryStep, setEntryStep] = useState<ClientEntryStep>('boot');
   const [session, setSession] = useState<ClientSession | null>(null);
   const [authProvider, setAuthProvider] = useState<AuthProvider | null>(null);
@@ -810,6 +811,7 @@ export default function App() {
         }
 
         setLocation(nextLocation);
+        setLocationAccuracyMeters(nextLocation.coords.accuracy ?? null);
         setErrorMsg(null);
 
         setOrigin((previousOrigin) => {
@@ -956,7 +958,24 @@ export default function App() {
               return;
             }
 
+            const nextAccuracy = nextLocation.coords.accuracy ?? Number.POSITIVE_INFINITY;
+
+            if (nextAccuracy > 60) {
+              return;
+            }
+
+            const currentAccuracy = location?.coords.accuracy ?? Number.POSITIVE_INFINITY;
+            const movedEnough = !location
+              || Math.abs(nextLocation.coords.latitude - location.coords.latitude) > 0.00005
+              || Math.abs(nextLocation.coords.longitude - location.coords.longitude) > 0.00005;
+            const meaningfullyMoreAccurate = nextAccuracy + 8 < currentAccuracy;
+
+            if (!movedEnough && !meaningfullyMoreAccurate) {
+              return;
+            }
+
             setLocation(nextLocation);
+            setLocationAccuracyMeters(nextLocation.coords.accuracy ?? null);
 
             setOrigin((previousOrigin) => {
               if (previousOrigin?.name !== 'Mi ubicación actual') {
@@ -982,7 +1001,7 @@ export default function App() {
       isMounted = false;
       subscription?.remove();
     };
-  }, [entryStep]);
+  }, [entryStep, location]);
 
   const persistSessionAndOpenHome = async (provider: AuthProvider, identifier: string, name: string) => {
     const nextSession: ClientSession = { provider, identifier, name };
@@ -1927,11 +1946,6 @@ export default function App() {
                 {clientProfile?.provider === 'email' ? 'Correo' : 'Google'}
               </Text>
             </View>
-            <View style={styles.readonlyRow}>
-              <Text style={styles.readonlyLabel}>ID de cuenta</Text>
-              <Text style={styles.readonlyValue}>{session?.identifier ?? 'Sin dato'}</Text>
-            </View>
-
             <TouchableOpacity
               style={[styles.authPrimaryButton, savingProfileChanges && styles.disabledButton]}
               onPress={() => void persistEditableProfile()}
@@ -2025,6 +2039,12 @@ export default function App() {
                 : `Línea recta · 💰 ${formatCop(computedFare ?? 5000)}`}
           </Text>
         )}
+
+        {origin?.name === 'Mi ubicación actual' && locationAccuracyMeters != null ? (
+          <Text style={styles.gpsAccuracyText}>
+            Precision GPS aprox.: {Math.round(locationAccuracyMeters)} m
+          </Text>
+        ) : null}
       </View>
 
       {(origin || location) ? (
@@ -2565,6 +2585,7 @@ const styles = StyleSheet.create({
   useLocationButton: { marginLeft: 8, backgroundColor: '#10B981', borderRadius: 10, width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
   useLocationText: { fontSize: 16 },
   routeMetaText: { marginTop: 4, fontSize: 12, color: '#64748B', textAlign: 'center', fontWeight: '600' },
+  gpsAccuracyText: { marginTop: 6, fontSize: 12, color: '#0F766E', textAlign: 'center', fontWeight: '700' },
   
   embeddedGpsButton: { marginBottom: 12, backgroundColor: '#1E3A8A', borderRadius: 12, padding: 12, alignItems: 'center' },
   embeddedGpsText: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
