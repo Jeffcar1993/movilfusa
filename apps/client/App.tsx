@@ -108,6 +108,8 @@ interface ClientRegistrationProfile {
   identifier: string;
   profilePhotoUrl?: string;
   registrationComplete: boolean;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 type ProfileSection = 'menu' | 'details' | 'history';
@@ -128,6 +130,9 @@ const fallbackApiBaseUrl = Platform.select({
 
 const API_BASE_URL = (process.env.EXPO_PUBLIC_API_URL ?? fallbackApiBaseUrl).replace(/\/$/, '');
 const formatCop = (fare: number) => `$${fare.toLocaleString('es-CO')} COP`;
+const REGISTER_PASSWORD_REQUIREMENTS_MESSAGE =
+  'La contraseña debe tener mínimo 8 caracteres e incluir mayúscula, minúscula, número y carácter especial.';
+const REGISTER_PASSWORD_POLICY_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
 const formatDateTime = (value?: string) => {
   if (!value) {
     return 'Sin fecha';
@@ -251,6 +256,8 @@ export default function App() {
   const [authProvider, setAuthProvider] = useState<AuthProvider | null>(null);
   const [profileName, setProfileName] = useState('');
   const [authFeedback, setAuthFeedback] = useState<string | null>(null);
+  const [profileSaveNotice, setProfileSaveNotice] = useState<string | null>(null);
+  const profileSaveNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [googleAuthLoading, setGoogleAuthLoading] = useState(false);
   const [emailAuthLoading, setEmailAuthLoading] = useState(false);
   const [emailAuthMode, setEmailAuthMode] = useState<'register' | 'login'>('register');
@@ -310,6 +317,19 @@ export default function App() {
     setClientProfile(profile);
   };
 
+  const showProfileSaveNotice = (message: string) => {
+    setProfileSaveNotice(message);
+
+    if (profileSaveNoticeTimeoutRef.current) {
+      clearTimeout(profileSaveNoticeTimeoutRef.current);
+    }
+
+    profileSaveNoticeTimeoutRef.current = setTimeout(() => {
+      setProfileSaveNotice(null);
+      profileSaveNoticeTimeoutRef.current = null;
+    }, 2600);
+  };
+
   const loadClientProfile = async (identifier: string): Promise<ClientRegistrationProfile | null> => {
     const profileRaw = await AsyncStorage.getItem(getClientProfileKey(identifier));
     if (!profileRaw) {
@@ -334,6 +354,14 @@ export default function App() {
       setProfilePhone(clientProfile?.phone ?? '');
     }
   }, [clientProfile, entryStep, profileSection, session, showProfileScreen]);
+
+  useEffect(() => {
+    return () => {
+      if (profileSaveNoticeTimeoutRef.current) {
+        clearTimeout(profileSaveNoticeTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const syncClientSessionFromSupabaseUser = async (user: User, providerOverride?: AuthProvider) => {
     setGoogleAuthLoading(false);
@@ -360,7 +388,7 @@ export default function App() {
 
     const { data: profileRow, error: profileError } = await supabase
       .from('profiles')
-      .select('id, name, phone, avatar_url')
+      .select('id, name, phone, avatar_url, created_at, updated_at')
       .eq('id', user.id)
       .maybeSingle();
 
@@ -396,6 +424,8 @@ export default function App() {
           ? profileRow.avatar_url
           : avatarUrl,
       registrationComplete: true,
+      createdAt: typeof profileRow?.created_at === 'string' ? profileRow.created_at : undefined,
+      updatedAt: typeof profileRow?.updated_at === 'string' ? profileRow.updated_at : undefined,
     });
 
     setSession(nextSession);
@@ -407,7 +437,7 @@ export default function App() {
     setEntryStep('home');
   };
 
-  const handleLogout = async () => {
+  const performLogout = async () => {
     try {
       await supabase.auth.signOut();
       await AsyncStorage.removeItem(CLIENT_SESSION_KEY);
@@ -422,18 +452,35 @@ export default function App() {
     setEntryStep('login');
   };
 
+  const handleLogout = () => {
+    Alert.alert(
+      'Cerrar sesión',
+      '¿Realmente quieres cerrar sesión?',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Cerrar sesión',
+          style: 'destructive',
+          onPress: () => {
+            void performLogout();
+          },
+        },
+      ],
+    );
+  };
+
   const handleDeleteAccount = () => {
     if (!session) {
       return;
     }
 
     Alert.alert(
-      'Eliminar cuenta',
-      'Esta acción es permanente y cerrará tu sesión.',
+      'Eliminar perfil',
+      '¿Realmente quieres eliminar tu perfil? Esta acción es permanente y cerrará tu sesión.',
       [
         { text: 'Cancelar', style: 'cancel' },
         {
-          text: 'Eliminar',
+          text: 'Eliminar perfil',
           style: 'destructive',
           onPress: async () => {
             try {
@@ -480,13 +527,9 @@ export default function App() {
     }
 
     setUploadingProfilePhoto(true);
-
-    let identifier = session?.identifier ?? '';
-
-    if (!identifier) {
-      const { data } = await supabase.auth.getUser();
-      identifier = data.user?.id ?? '';
-    }
+    const previousIdentifier = session?.identifier?.trim() ?? '';
+    const { data: authUserData } = await supabase.auth.getUser();
+    const identifier = authUserData.user?.id?.trim() || previousIdentifier;
 
     if (!identifier) {
       setAuthFeedback('No fue posible resolver tu usuario para subir la foto. Inicia sesión nuevamente.');
@@ -549,21 +592,38 @@ export default function App() {
         registrationComplete: true,
       };
 
-      await saveClientProfile(updatedProfile);
-
-      const { error: profileUpsertError } = await supabase.from('profiles').upsert(
-        {
-          id: identifier,
-          role: 'client',
-          name: updatedProfile.name,
-          avatar_url: uploadedPhotoUrl,
-        },
-        { onConflict: 'id' },
-      );
+      const { data: profileUpsertRow, error: profileUpsertError } = await supabase
+        .from('profiles')
+        .upsert(
+          {
+            id: identifier,
+            role: 'client',
+            name: updatedProfile.name,
+            avatar_url: uploadedPhotoUrl,
+          },
+          { onConflict: 'id' },
+        )
+        .select('id, name, phone, avatar_url, created_at, updated_at')
+        .single();
 
       if (profileUpsertError) {
         throw profileUpsertError;
       }
+
+      await saveClientProfile({
+        name: updatedProfile.name,
+        provider: updatedProfile.provider,
+        identifier,
+        email: updatedProfile.email,
+        phone: typeof profileUpsertRow?.phone === 'string' ? profileUpsertRow.phone : updatedProfile.phone,
+        profilePhotoUrl:
+          typeof profileUpsertRow?.avatar_url === 'string' && profileUpsertRow.avatar_url.trim().length > 0
+            ? profileUpsertRow.avatar_url
+            : uploadedPhotoUrl,
+        registrationComplete: true,
+        createdAt: typeof profileUpsertRow?.created_at === 'string' ? profileUpsertRow.created_at : undefined,
+        updatedAt: typeof profileUpsertRow?.updated_at === 'string' ? profileUpsertRow.updated_at : undefined,
+      });
 
       const { error: metadataError } = await supabase.auth.updateUser({
         data: {
@@ -580,6 +640,11 @@ export default function App() {
         void supabase.storage.from(CLIENT_AVATAR_BUCKET).remove([previousPhotoPath]);
       }
 
+      if (previousIdentifier && previousIdentifier !== identifier) {
+        void AsyncStorage.removeItem(getClientProfileKey(previousIdentifier));
+      }
+
+      showProfileSaveNotice('Cambios guardados. Foto de perfil actualizada.');
       setAuthFeedback('Foto de perfil subida y sincronizada en Supabase.');
     } catch {
       setAuthFeedback('No fue posible subir la foto a Supabase. Intenta de nuevo.');
@@ -592,7 +657,10 @@ export default function App() {
     const trimmedName = profileName.trim();
     const normalizedEmail = profileEmail.trim().toLowerCase();
     const sanitizedPhone = profilePhone.replace(/[^\d+]/g, '').trim();
-    const identifier = session?.identifier ?? '';
+    const previousIdentifier = session?.identifier?.trim() ?? '';
+
+    const { data: currentUserData } = await supabase.auth.getUser();
+    const identifier = currentUserData.user?.id?.trim() || previousIdentifier;
 
     if (!identifier) {
       setAuthFeedback('No fue posible resolver tu cuenta. Inicia sesión de nuevo.');
@@ -612,7 +680,6 @@ export default function App() {
     setSavingProfileChanges(true);
 
     try {
-      const { data: currentUserData } = await supabase.auth.getUser();
       const currentEmail = currentUserData.user?.email?.trim().toLowerCase() ?? session?.email?.trim().toLowerCase() ?? '';
       const avatarUrl = clientProfile?.profilePhotoUrl?.trim() || null;
 
@@ -641,16 +708,20 @@ export default function App() {
         }
       }
 
-      const { error: profileUpsertError } = await supabase.from('profiles').upsert(
-        {
-          id: identifier,
-          role: 'client',
-          name: trimmedName,
-          phone: sanitizedPhone || null,
-          avatar_url: avatarUrl,
-        },
-        { onConflict: 'id' },
-      );
+      const { data: profileUpsertRow, error: profileUpsertError } = await supabase
+        .from('profiles')
+        .upsert(
+          {
+            id: identifier,
+            role: 'client',
+            name: trimmedName,
+            phone: sanitizedPhone || null,
+            avatar_url: avatarUrl,
+          },
+          { onConflict: 'id' },
+        )
+        .select('id, name, phone, avatar_url, created_at, updated_at')
+        .single();
 
       if (profileUpsertError) {
         throw profileUpsertError;
@@ -674,12 +745,22 @@ export default function App() {
         provider: authProvider ?? session?.provider ?? 'email',
         identifier,
         email: normalizedEmail,
-        phone: sanitizedPhone || undefined,
-        profilePhotoUrl: avatarUrl ?? undefined,
+        phone: typeof profileUpsertRow?.phone === 'string' ? profileUpsertRow.phone : sanitizedPhone || undefined,
+        profilePhotoUrl:
+          typeof profileUpsertRow?.avatar_url === 'string' && profileUpsertRow.avatar_url.trim().length > 0
+            ? profileUpsertRow.avatar_url
+            : avatarUrl ?? undefined,
         registrationComplete: true,
+        createdAt: typeof profileUpsertRow?.created_at === 'string' ? profileUpsertRow.created_at : undefined,
+        updatedAt: typeof profileUpsertRow?.updated_at === 'string' ? profileUpsertRow.updated_at : undefined,
       });
 
+      if (previousIdentifier && previousIdentifier !== identifier) {
+        void AsyncStorage.removeItem(getClientProfileKey(previousIdentifier));
+      }
+
       setSession(nextSession);
+      showProfileSaveNotice('Cambios guardados.');
       setAuthFeedback(
         normalizedEmail !== currentEmail
           ? 'Perfil actualizado. Si Supabase exige confirmación de correo, revisa tu email.'
@@ -1138,8 +1219,8 @@ export default function App() {
       return;
     }
 
-    if (password.length < 6) {
-      setAuthFeedback('La contraseña debe tener al menos 6 caracteres.');
+    if (emailAuthMode === 'register' && !REGISTER_PASSWORD_POLICY_REGEX.test(password)) {
+      setAuthFeedback(REGISTER_PASSWORD_REQUIREMENTS_MESSAGE);
       return;
     }
 
@@ -1468,12 +1549,8 @@ export default function App() {
     notifiedAcceptedTripIdRef.current = null;
 
     try {
-      let clientIdentifier = session?.identifier ?? '';
-
-      if (!clientIdentifier) {
-        const { data } = await supabase.auth.getUser();
-        clientIdentifier = data.user?.id ?? '';
-      }
+      const { data: authUserData } = await supabase.auth.getUser();
+      const clientIdentifier = authUserData.user?.id?.trim() || session?.identifier?.trim() || '';
 
       if (!clientIdentifier) {
         setDriverError('Debes iniciar sesión para solicitar un viaje.');
@@ -1946,6 +2023,17 @@ export default function App() {
                 {clientProfile?.provider === 'email' ? 'Correo' : 'Google'}
               </Text>
             </View>
+            <View style={styles.readonlyRow}>
+              <Text style={styles.readonlyLabel}>Última actualización</Text>
+              <Text style={styles.readonlyValue}>
+                {clientProfile?.updatedAt
+                  ? formatDateTime(clientProfile.updatedAt)
+                  : clientProfile?.createdAt
+                    ? formatDateTime(clientProfile.createdAt)
+                    : 'Sin actualizaciones registradas'}
+              </Text>
+            </View>
+            {profileSaveNotice ? <Text style={styles.profileSaveNotice}>{profileSaveNotice}</Text> : null}
             <TouchableOpacity
               style={[styles.authPrimaryButton, savingProfileChanges && styles.disabledButton]}
               onPress={() => void persistEditableProfile()}
@@ -2601,6 +2689,18 @@ const styles = StyleSheet.create({
   profileTripPrimary: { color: '#0F172A', fontWeight: '800', fontSize: 13, marginBottom: 3 },
   profileTripMeta: { color: '#475569', fontWeight: '600', fontSize: 12 },
   profileEmptyText: { color: '#64748B', textAlign: 'center', fontWeight: '600', marginTop: 10 },
+  profileSaveNotice: {
+    marginBottom: 10,
+    textAlign: 'center',
+    color: '#0F766E',
+    fontWeight: '800',
+    backgroundColor: '#DCFCE7',
+    borderWidth: 1,
+    borderColor: '#86EFAC',
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+  },
 
   confirmTripContainer: { position: 'absolute', left: 16, right: 16, bottom: 30, backgroundColor: '#FFFFFF', borderRadius: 24, padding: 20, elevation: 12, shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.15, shadowRadius: 10, zIndex: 30 },
   serviceTypeRow: {

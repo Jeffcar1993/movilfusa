@@ -84,6 +84,10 @@ interface RegisterClientAuthRequestBody {
   name?: string;
 }
 
+const REGISTER_PASSWORD_REQUIREMENTS_MESSAGE =
+  'La contraseña debe tener mínimo 8 caracteres e incluir mayúscula, minúscula, número y carácter especial.';
+const REGISTER_PASSWORD_POLICY_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
+
 interface TripRecord {
   id: string;
   origin: Required<TripPoint>;
@@ -542,8 +546,8 @@ app.post('/api/client/auth/register', async (req: Request, res: Response) => {
     return res.status(400).json({ message: 'Correo inválido.' });
   }
 
-  if (password.length < 6) {
-    return res.status(400).json({ message: 'La contraseña debe tener al menos 6 caracteres.' });
+  if (!REGISTER_PASSWORD_POLICY_REGEX.test(password)) {
+    return res.status(400).json({ message: REGISTER_PASSWORD_REQUIREMENTS_MESSAGE });
   }
 
   try {
