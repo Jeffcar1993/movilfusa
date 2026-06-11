@@ -17,7 +17,8 @@
     "driver:tunnel": "npm run start --workspace=driver -- --tunnel -c",
     "android": "npm run run:android --workspace=client",
     "android:driver": "npm run run:android --workspace=driver",
-    "ios": "expo run:ios"
+    "ios": "expo run:ios",
+    "phone:bridge": "adb devices -l && adb reverse tcp:8081 tcp:8081 && adb reverse tcp:3000 tcp:3000 && adb reverse --list"
   },
   "keywords": [],
   "author": "",
